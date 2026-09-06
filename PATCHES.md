@@ -32,9 +32,11 @@ property from both directions: the Chinese receipt, and a test that a
 monochrome face never lends its glyphs.
 
 **Layout and ink still agree.** Measurement never sees the fallback face, so it
-bills an emoji as an uncovered pictograph (0.8 em). A fallback glyph is scaled
-to the cell already charged for it rather than inked at its natural 1.0 em, so
-nothing spills into the next character.
+bills the codepoint from the text face's estimator. For the BMP symbol range
+U+2190..U+2BFF (hearts, dingbats, arrows) that is the 0.8 em pictograph class,
+while an emoji face draws a full 1.0 em. A fallback glyph is scaled to the cell
+already charged for it, so nothing spills into the next character. The astral
+planes are already billed 1.0 em and pass through untouched.
 
 ## Branches
 
@@ -55,7 +57,20 @@ git rebase upstream/main
 zig build test
 ```
 
-The tests are the check that matters. `the emoji receipt` fails if either half
-of the patch stops working: it renders emoji through the public path and counts
-saturated pixels, which a monochrome renderer cannot produce however many
-outlines it inks.
+The tests are the check that matters, and there is one per rule.
+
+`the emoji receipt` covers the colour rule: it renders through the public path
+and counts saturated pixels, which a monochrome renderer cannot produce however
+many outlines it inks.
+
+`a fallback glyph is inked inside the cell layout charged for it` covers the
+fitting rule, and it exists because the receipt does NOT. An emoji in the wrong
+place is still a coloured emoji, so the receipt stays green with the fitting
+removed; the fitting test measures the inked width against the cell the
+estimator charged and fails at 14.0px into an 11.2px cell. Both are probed:
+neutering either half fails its own test and only its own test.
+
+Note which codepoint that test uses and why. U+2764 is in the BMP symbol range,
+the only class where the estimator and an emoji face disagree. An astral emoji
+cannot detect the fitting's absence, so a test written with one would pass
+either way — which is exactly the hole this test was added to close.
