@@ -1114,3 +1114,130 @@ test "ui app fonts option surfaces the glyph-budget refusal as a teaching error"
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasFontCount());
     try std.testing.expect(harness.runtime.dispatchErrorTotal() > 0);
 }
+
+// ------------------------------------------- the emoji receipt (colour-emoji patch)
+
+/// Committed COLR fixture: Twemoji Mozilla v0.7.0 subsetted to four emoji
+/// plus notdef (2.6 KB; attribution rides beside the file in
+/// testdata/fonts/TWEMOJI-LICENSE.txt). It keeps what the patch needs to
+/// exercise for real: a `COLR` v0 / `CPAL` pair, multi-layer base glyphs,
+/// and a format-12 cmap, which is the only kind that can reach an emoji
+/// above U+FFFF.
+const emoji_receipt_bytes = @embedFile("testdata/fonts/Twemoji-Receipt.ttf");
+
+/// 😂👍❤️🔥 — three astral codepoints and one BMP one, so the receipt covers
+/// both cmap subtable formats. The variation selector is left off: it is a
+/// presentation hint, not a glyph, and the fixture does not map it.
+const emoji_receipt_text = "\u{1F602}\u{1F44D}\u{2764}\u{1F525}";
+
+fn emojiFixtureWidgets(harness: anytype) !void {
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+    const controls = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(10, 10, 220, 60),
+        .text = emoji_receipt_text,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 240, 140), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+}
+
+/// Opaque pixels whose channels are far apart — a colour, as opposed to a
+/// shade of the near-black text colour (rgb 10,10,10) antialiased against
+/// the background. The one thing a monochrome renderer cannot produce
+/// however many outlines it inks.
+fn saturatedPixelCount(rgba: []const u8) usize {
+    var count: usize = 0;
+    var pixel: usize = 0;
+    while (pixel + 4 <= rgba.len) : (pixel += 4) {
+        if (rgba[pixel + 3] == 0) continue;
+        const high = @max(rgba[pixel], @max(rgba[pixel + 1], rgba[pixel + 2]));
+        const low = @min(rgba[pixel], @min(rgba[pixel + 1], rgba[pixel + 2]));
+        if (high - low > 60) count += 1;
+    }
+    return count;
+}
+
+test "the emoji receipt: a registered COLR face inks emoji in colour, and the text face keeps its own glyphs" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    try emojiFixtureWidgets(harness);
+
+    // The gap this closes, pinned before anything relies on it: the bundled
+    // text face maps none of these, so before the emoji face is registered
+    // the only thing the renderer can draw is a block per cluster.
+    var index: usize = 0;
+    while (index < emoji_receipt_text.len) {
+        const len = try std.unicode.utf8ByteSequenceLength(emoji_receipt_text[index]);
+        const codepoint = try std.unicode.utf8Decode(emoji_receipt_text[index .. index + len]);
+        try std.testing.expectEqual(@as(u16, 0), canvas.font_ttf.geist_regular.glyphIndex(codepoint));
+        index += len;
+    }
+    const tofu_shot = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(tofu_shot);
+    try std.testing.expectEqual(@as(usize, 0), saturatedPixelCount(tofu_shot));
+
+    try harness.runtime.registerCanvasFont(registered_font_id, emoji_receipt_bytes);
+    const face = harness.runtime.registeredCanvasFontFace(registered_font_id).?;
+    try std.testing.expect(face.hasColorGlyphs());
+
+    // Every emoji resolves in the registered face, including the three
+    // above U+FFFF that only a format-12 subtable can reach, and each
+    // one is a STACK of layers rather than a single outline.
+    var layered: usize = 0;
+    index = 0;
+    while (index < emoji_receipt_text.len) {
+        const len = try std.unicode.utf8ByteSequenceLength(emoji_receipt_text[index]);
+        const codepoint = try std.unicode.utf8Decode(emoji_receipt_text[index .. index + len]);
+        const glyph = face.glyphIndex(codepoint);
+        try std.testing.expect(glyph != 0);
+        const layers = face.colorLayerCount(glyph);
+        try std.testing.expect(layers > 0);
+        if (layers > 1) layered += 1;
+        // Each layer names a real glyph and a readable palette colour.
+        var layer_index: u16 = 0;
+        while (layer_index < layers) : (layer_index += 1) {
+            const layer = face.colorLayer(glyph, layer_index).?;
+            try std.testing.expect(layer.glyph != 0);
+            try std.testing.expect(layer.use_text_color or layer.a > 0);
+        }
+        index += len;
+    }
+    try std.testing.expect(layered >= 2);
+
+    // The receipt. The view still asks for the BUNDLED sans face — the
+    // fallback is the renderer's, not the app's — and the pixels come back
+    // in colour, which no number of monochrome outlines could produce.
+    const colour_shot = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(colour_shot);
+    try std.testing.expect(saturatedPixelCount(colour_shot) > 100);
+    try std.testing.expect(!std.mem.eql(u8, colour_shot, tofu_shot));
+}
+
+test "the colour fallback is for colour faces only: a monochrome face never lends its glyphs to another id" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    try installFontFixtureWidgets(harness);
+
+    // Registering the CJK face must not change what the BUNDLED face draws.
+    // Without this the fallback would make one font id able to draw with
+    // another's outlines, which is the property the Chinese receipt pins.
+    const before = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(before);
+    try harness.runtime.registerCanvasFont(registered_font_id, cjk_receipt_bytes);
+    const face = harness.runtime.registeredCanvasFontFace(registered_font_id).?;
+    try std.testing.expect(!face.hasColorGlyphs());
+    const after = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(after);
+    try std.testing.expect(std.mem.eql(u8, before, after));
+}

@@ -844,6 +844,53 @@ pub const ReferenceRenderSurface = struct {
         self.fillTextRect(command.transform.transformRect(block_rect).normalized(), draw_bounds, value.color, command.opacity);
     }
 
+    // BEGIN colour-emoji patch
+    /// Inks one `COLR` v0 glyph, bottom layer first. True when anything was
+    /// drawn; false hands the glyph back to the monochrome path.
+    fn drawColorGlyph(
+        self: ReferenceRenderSurface,
+        command: RenderCommand,
+        value: DrawText,
+        draw_bounds: geometry.RectF,
+        face: *const font_ttf.Face,
+        glyph: u16,
+        layer_count: u16,
+        total: Affine,
+    ) bool {
+        const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return true;
+        var drew = false;
+        var index: u16 = 0;
+        while (index < layer_count) : (index += 1) {
+            const layer = face.colorLayer(glyph, index) orelse continue;
+            var builder = vector.PathBuilder(reference_glyph_path_capacity){};
+            face.glyphOutline(layer.glyph, total, &builder) catch continue;
+            if (builder.slice().len == 0) continue;
+            const colour = if (layer.use_text_color)
+                value.color
+            else
+                canvas.Color.rgba8(layer.r, layer.g, layer.b, layer.a);
+            var sink = ReferenceCoverageSink{
+                .surface = self,
+                .fill = .{ .color = colour },
+                .transform = command.transform,
+                .opacity = command.opacity,
+                .coverage_blend = .srgb,
+            };
+            vector.fillGlyphPath(
+                &reference_glyph_raster_scratch.get().raster,
+                builder.slice(),
+                Affine.identity(),
+                .nonzero,
+                vector.default_tolerance,
+                referenceVectorClip(pixel_rect),
+                &sink,
+            ) catch continue;
+            drew = true;
+        }
+        return drew;
+    }
+    // END colour-emoji patch
+
     /// True when the glyph was handled (drawn, or intentionally empty
     /// like a space); false requests the block fallback.
     fn drawGlyphOutline(
@@ -856,9 +903,12 @@ pub const ReferenceRenderSurface = struct {
         baseline: f32,
         cell_advance: f32,
     ) bool {
-        const face = referenceFaceForFontId(self.fonts, value.font_id);
-        const glyph = face.glyphIndex(codepoint);
-        if (glyph == 0) return false;
+        // Colour-emoji patch: the face that HAS the codepoint, which is the
+        // requested one for ordinary text and a registered emoji face for a
+        // picture the text face never carried.
+        const found = referenceGlyphFor(self.fonts, value.font_id, codepoint) orelse return false;
+        const face = found.face;
+        const glyph = found.glyph;
 
         // Center the outline's natural advance inside its layout cell when
         // the cell is wider. With the bundled mono face this is the
@@ -866,14 +916,33 @@ pub const ReferenceRenderSurface = struct {
         // cell layout charges, so inset 0), and sans cells equal their
         // natural advance too — the inset stays for any future face whose
         // ink runs narrower than its layout cell.
-        const natural_advance = value.size * (face.advance(glyph) / face.units_per_em);
+        var scale = value.size / face.units_per_em;
+        var natural_advance = value.size * (face.advance(glyph) / face.units_per_em);
+        // Colour-emoji patch: a FALLBACK glyph is fitted to the cell layout
+        // already charged for it. Measurement never saw the fallback face, so
+        // it billed the codepoint as an uncovered pictograph (0.8 em,
+        // text_metrics.clusterAdvanceEmForFace), while an emoji face draws a
+        // full 1.0 em. Inking it unscaled would spill over the next character.
+        // Shrinking to the reserved cell keeps ink and layout in agreement
+        // without teaching the metrics module about a second face.
+        if (found.fallback and cell_advance > 0 and natural_advance > cell_advance) {
+            scale *= cell_advance / natural_advance;
+            natural_advance = cell_advance;
+        }
         const cell_inset = @max(0, (cell_advance - natural_advance) * 0.5);
-
-        const scale = value.size / face.units_per_em;
         // Font units are y-up; bake the flip and em scaling into the pen
         // placement, then apply the command transform on top.
         const local = Affine{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = pen_x + cell_inset, .ty = baseline };
         const total = command.transform.multiply(local);
+
+        // BEGIN colour-emoji patch: a COLR glyph is a STACK of outlines, each
+        // with its own palette colour, so it is inked layer by layer rather
+        // than once in the text colour. Monochrome glyphs skip all of this.
+        const layer_count = face.colorLayerCount(glyph);
+        if (layer_count > 0) {
+            if (self.drawColorGlyph(command, value, draw_bounds, face, glyph, layer_count, total)) return true;
+        }
+        // END colour-emoji patch
 
         var builder = vector.PathBuilder(reference_glyph_path_capacity){};
         face.glyphOutline(glyph, total, &builder) catch return false;
@@ -1166,6 +1235,41 @@ fn referenceFaceForFontId(fonts: []const ReferenceFont, font_id: canvas.FontId) 
     if (font_id == canvas.default_mono_font_id) return &font_ttf.geist_mono;
     return &font_ttf.geist_regular;
 }
+
+// BEGIN colour-emoji patch (zig-nostr/native, see vercel-labs/native#421)
+
+/// The face that actually HAS this codepoint, and its glyph.
+///
+/// The face a font id names is asked first and wins whenever it maps the
+/// codepoint, so a font id still means the face it names and ordinary text is
+/// untouched. The fallback is deliberately narrow: only a registered face that
+/// carries `COLR` gets a second look, and only for a codepoint the named face
+/// has no glyph for.
+///
+/// Narrow on purpose. Falling back to every registered face would make one
+/// font id able to draw with another's outlines, which is exactly the property
+/// `canvas_font_tests` pins (a CJK face registered under its own id, tofu
+/// everywhere else). A colour face has no monochrome text to lend, so
+/// admitting only those adds emoji coverage without moving that line.
+fn referenceGlyphFor(
+    fonts: []const ReferenceFont,
+    font_id: canvas.FontId,
+    codepoint: u21,
+) ?struct { face: *const font_ttf.Face, glyph: u16, fallback: bool } {
+    const primary = referenceFaceForFontId(fonts, font_id);
+    const direct = primary.glyphIndex(codepoint);
+    if (direct != 0) return .{ .face = primary, .glyph = direct, .fallback = false };
+
+    for (fonts) |font| {
+        if (font.face == primary) continue;
+        if (!font.face.hasColorGlyphs()) continue;
+        const glyph = font.face.glyphIndex(codepoint);
+        if (glyph != 0) return .{ .face = font.face, .glyph = glyph, .fallback = true };
+    }
+    return null;
+}
+
+// END colour-emoji patch
 
 /// Decode the first codepoint of the cluster `text[start..start+len]`;
 /// null when the draw carries no text bytes for the glyph (pure glyph-id
