@@ -920,11 +920,17 @@ pub const ReferenceRenderSurface = struct {
         var natural_advance = value.size * (face.advance(glyph) / face.units_per_em);
         // Colour-emoji patch: a FALLBACK glyph is fitted to the cell layout
         // already charged for it. Measurement never saw the fallback face, so
-        // it billed the codepoint as an uncovered pictograph (0.8 em,
-        // text_metrics.clusterAdvanceEmForFace), while an emoji face draws a
-        // full 1.0 em. Inking it unscaled would spill over the next character.
-        // Shrinking to the reserved cell keeps ink and layout in agreement
-        // without teaching the metrics module about a second face.
+        // it billed the codepoint from the text face's estimator, and for the
+        // BMP symbol range U+2190..U+2BFF (hearts, dingbats, arrows) that is
+        // the 0.8 em pictograph class while an emoji face draws a full 1.0 em.
+        // Inking it unscaled would spill a quarter of a cell over the next
+        // character. Shrinking to the reserved cell keeps ink and layout in
+        // agreement without teaching the metrics module about a second face.
+        //
+        // The ASTRAL planes are already billed 1.0 em by the same estimator
+        // (isEastAsianWideCodepoint, text_metrics.zig), so most emoji reach
+        // this with natural_advance == cell_advance and pass through
+        // untouched. That is why the guard is a comparison and not a constant.
         if (found.fallback and cell_advance > 0 and natural_advance > cell_advance) {
             scale *= cell_advance / natural_advance;
             natural_advance = cell_advance;

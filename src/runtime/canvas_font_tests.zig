@@ -1241,3 +1241,106 @@ test "the colour fallback is for colour faces only: a monochrome face never lend
     defer std.testing.allocator.free(after);
     try std.testing.expect(std.mem.eql(u8, before, after));
 }
+
+/// Horizontal extent of the coloured ink in an RGBA8 screenshot, in pixels,
+/// or null when there is none. Colour is the emoji's alone (the text colour
+/// is rgb 10,10,10), so this measures the emoji and nothing else.
+fn saturatedInkWidth(rgba: []const u8, width: usize) ?usize {
+    var min_x: usize = width;
+    var max_x: usize = 0;
+    var found = false;
+    var pixel: usize = 0;
+    while (pixel + 4 <= rgba.len) : (pixel += 4) {
+        if (rgba[pixel + 3] != 0) {
+            const high = @max(rgba[pixel], @max(rgba[pixel + 1], rgba[pixel + 2]));
+            const low = @min(rgba[pixel], @min(rgba[pixel + 1], rgba[pixel + 2]));
+            if (high - low > 60) {
+                const x = (pixel / 4) % width;
+                if (x < min_x) min_x = x;
+                if (x > max_x) max_x = x;
+                found = true;
+            }
+        }
+    }
+    if (!found) return null;
+    return max_x - min_x + 1;
+}
+
+test "a fallback glyph is inked inside the cell layout charged for it" {
+    // The other half of the patch's contract, and the half a colour test
+    // cannot see. Layout never meets the fallback face, so it bills the
+    // codepoint from the bundled face's estimator. For the BMP symbol range
+    // that is the 0.8 em pictograph class, while an emoji face draws a full
+    // 1.0 em: ink it unscaled and it hangs 25% into the next character.
+    //
+    // The colour receipt counts saturated pixels and compares against tofu, so
+    // it stays green with the fitting removed — an emoji in the WRONG PLACE is
+    // still a coloured emoji. Nothing else in the tree asserts an advance or a
+    // position for this path, so without this test the fitting is unpinned,
+    // and the expression it depends on (`cell_advance`, from the measure
+    // provider) is in code upstream actively edits.
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+
+    // U+2764 HEAVY BLACK HEART on purpose, and the choice is the whole test.
+    // The estimator bills the ASTRAL emoji planes 1.0 em (they are in
+    // `isEastAsianWideCodepoint`, text_metrics.zig:288), which is exactly what
+    // an emoji face draws, so U+1F602 and friends need no fitting and cannot
+    // detect its absence. Only the BMP symbol range U+2190..U+2BFF takes the
+    // 0.8 em pictograph class (text_metrics.zig:246, :265), and that is the
+    // class the fitting exists for. Its ink spans 0.992 em in the fixture, so
+    // the measured width IS the advance the renderer chose.
+    const glyph_text = "\u{2764}";
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+    const controls = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(10, 10, 220, 40),
+        .text = glyph_text,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 240, 140), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.registerCanvasFont(registered_font_id, emoji_receipt_bytes);
+
+    const tokens = fontFixtureTokens(&harness.runtime, canvas.default_sans_font_id);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", tokens);
+    const pixel_size = try harness.runtime.canvasScreenshotPixelSize(1, "canvas", null);
+    const pixels = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(pixels);
+    const scratch = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(scratch);
+    const shot = try harness.runtime.renderCanvasScreenshot(1, "canvas", null, pixels, scratch);
+
+    const ink = saturatedInkWidth(shot.rgba8, shot.width) orelse return error.TheEmojiWasNotDrawnAtAll;
+
+    // The cell layout actually charged, asked of the same estimator layout
+    // used, rather than hard-coded: 0.8 em for an uncovered pictograph today,
+    // and still correct if that constant is ever retuned.
+    const cell = canvas.estimateTextAdvanceForBytes(canvas.default_sans_font_id, glyph_text, tokens.typography.body_size);
+    const scale = @as(f32, @floatFromInt(shot.width)) / 240.0;
+    const cell_px = cell * scale;
+
+    // One pixel of slack for the antialias fringe on each edge. Unfitted, the
+    // glyph inks its natural 1.0 em into a 0.8 em cell, which is 25% over and
+    // nowhere near this bound.
+    const ink_px: f32 = @floatFromInt(ink);
+    if (ink_px > cell_px + 2.0) {
+        std.debug.print(
+            "\nthe fallback glyph inked {d:.1}px into a {d:.1}px cell: it is not being fitted, and it overlaps the next character\n",
+            .{ ink_px, cell_px },
+        );
+        return error.TheFallbackGlyphOverflowsItsCell;
+    }
+    // And it is not fitted to nothing: a glyph shrunk away would also satisfy
+    // the bound above.
+    try std.testing.expect(ink_px > cell_px * 0.5);
+}
