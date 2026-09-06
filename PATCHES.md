@@ -36,6 +36,17 @@ bills an emoji as an uncovered pictograph (0.8 em). A fallback glyph is scaled
 to the cell already charged for it rather than inked at its natural 1.0 em, so
 nothing spills into the next character.
 
+## Branches
+
+`colour-emoji` carries the patch on top of upstream `main`, which is the base an
+upstream change would want.
+
+`sdk-0.9.2-colour-emoji` carries the same commit on top of `8d0da34`, the SDK
+0.9.2 tree. **This is the branch Plaza consumes.** The automation protocol moved
+between 0.9.2 and `main`, and the CLI and the framework have to agree on it, so
+taking `main` would mean bumping the CLI in the same breath. Keeping the patch on
+the pinned tree keeps the emoji fix separable from an SDK upgrade.
+
 ## Rebasing onto a new upstream release
 
 ```
