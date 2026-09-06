@@ -117,6 +117,31 @@ pub const default_mono_font_family = FontFamily.geist_mono;
 /// atlas keys, and fingerprints.
 pub const min_registered_font_id: FontId = 64;
 
+// BEGIN sans-variant-registration patch (zig-nostr/native, see vercel-labs/native#423)
+
+/// True for the reserved ids an app is allowed to fill with its own face.
+///
+/// Ids 1 and 2 have bundled faces and 7..63 are unassigned, but the four sans
+/// VARIANTS have no bundled face at all: `textSpanFontId` maps a span's weight
+/// onto them, and a host with no text layer of its own resolves them straight
+/// back to the regular face (`reference.referenceFaceForFontId`). So off macOS
+/// medium and bold ink pixel-identically to regular, and no app can fix it:
+/// registering below `min_registered_font_id` is refused, and pointing
+/// `typography.font_id` at a registered family instead loses weight mapping
+/// entirely, because `textSpanFontId` then returns that one id for every span.
+///
+/// Opening exactly these four lets an app that already ships its family fill
+/// them, and the weight mapping keeps working because the ids are the ones the
+/// mapping already produces. Nothing else in the reserved range opens.
+pub fn isFillableReservedFontId(id: FontId) bool {
+    return id == default_sans_medium_font_id or
+        id == default_sans_bold_font_id or
+        id == default_sans_italic_font_id or
+        id == default_sans_bold_italic_font_id;
+}
+
+// END sans-variant-registration patch
+
 pub const default_glyph_atlas_cache_retention_frames: u64 = 120;
 pub const default_text_layout_cache_retention_frames: u64 = 120;
 

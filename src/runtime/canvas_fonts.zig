@@ -117,7 +117,9 @@ pub fn unboundCanvasFontMeasure(context: ?*anyopaque, font_id: canvas.FontId, si
 pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
     return struct {
         /// Register the TrueType face in `ttf` under `id` (an app-chosen
-        /// id at or above `canvas.min_registered_font_id`). The runtime
+        /// id at or above `canvas.min_registered_font_id`, or one of the
+        /// reserved sans variant ids an app may fill — see
+        /// `canvas.isFillableReservedFontId`). The runtime
         /// copies the bytes, so the caller's buffer is free when this
         /// returns; the id resolves everywhere a `FontId` rides, for the
         /// rest of the runtime's lifetime. Startup-shaped: register before
@@ -127,8 +129,10 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// Errors — all at registration, never at render time:
         /// `error.InvalidFontId` (id 0 is the "inherit run font"
         /// sentinel), `error.ReservedFontId` (below
-        /// `canvas.min_registered_font_id` — reserved for built-in
-        /// faces), `error.FontTooLarge` (over the per-font bound
+        /// `canvas.min_registered_font_id` and not one of the four sans
+        /// variant ids `canvas.isFillableReservedFontId` names — the rest
+        /// of that range is reserved for built-in faces),
+        /// `error.FontTooLarge` (over the per-font bound
         /// `canvas_limits.max_registered_canvas_font_bytes`),
         /// `error.FontIdInUse` (ids are permanent; see the module doc),
         /// `error.FontRegistryFull` (all
@@ -144,7 +148,10 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// the face could not be honored pixel-honestly).
         pub fn registerCanvasFont(self: *Runtime, id: canvas.FontId, ttf: []const u8) anyerror!void {
             if (id == 0) return error.InvalidFontId;
-            if (id < canvas.min_registered_font_id) return error.ReservedFontId;
+            // Sans-variant-registration patch: the four reserved sans variant
+            // ids have no bundled face, so an app filling them is the only way
+            // to get medium and bold off macOS (canvas.isFillableReservedFontId).
+            if (id < canvas.min_registered_font_id and !canvas.isFillableReservedFontId(id)) return error.ReservedFontId;
             if (ttf.len > max_registered_canvas_font_bytes) return error.FontTooLarge;
             if (findCanvasFontIndex(self, id) != null) return error.FontIdInUse;
             if (self.canvas_font_count >= max_registered_canvas_fonts) return error.FontRegistryFull;
