@@ -4418,8 +4418,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             .{ font.name, canvas.min_registered_font_id },
                         ),
                         error.ReservedFontId => ui_app_log.warn(
-                            "font \"{s}\" (id {d}) failed to register: ids below {d} are reserved for built-in faces; choose an id at or above {d} (canvas.min_registered_font_id)",
-                            .{ font.name, font.id, canvas.min_registered_font_id, canvas.min_registered_font_id },
+                            "font \"{s}\" (id {d}) failed to register: ids below {d} are reserved for built-in faces; choose an id at or above {d} (canvas.min_registered_font_id), or one of the sans variant ids {d}-{d} to supply a weight the toolkit has no face for",
+                            .{ font.name, font.id, canvas.min_registered_font_id, canvas.min_registered_font_id, canvas.default_sans_medium_font_id, canvas.default_sans_bold_italic_font_id },
                         ),
                         error.FontIdInUse => ui_app_log.warn(
                             "font \"{s}\" (id {d}) failed to register: that id already holds a registered face, and registered ids are permanent (atlas caches key glyphs by font id) — give each face its own id",
