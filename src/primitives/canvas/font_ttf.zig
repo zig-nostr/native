@@ -118,6 +118,15 @@ pub const Face = struct {
     ascender: i16,
     descender: i16,
     cmap4_offset: usize,
+    // BEGIN colour-emoji patch (zig-nostr/native, see vercel-labs/native#421)
+    /// A format-12 unicode subtable when the face has one. Format 4 stops at
+    /// U+FFFF, which is where most emoji live above.
+    cmap12_offset: ?usize = null,
+    /// `COLR` v0 and `CPAL`: a base glyph drawn as an ordered list of outline
+    /// layers, each with a palette colour. Absent on a monochrome face.
+    colr_offset: ?usize = null,
+    cpal_offset: ?usize = null,
+    // END colour-emoji patch
     loca_offset: usize,
     loca_len: usize,
     glyf_offset: usize,
@@ -134,6 +143,10 @@ pub const Face = struct {
         var glyf: ?Range = null;
         var hmtx: ?Range = null;
         var hhea: ?Range = null;
+        // BEGIN colour-emoji patch
+        var colr: ?Range = null;
+        var cpal: ?Range = null;
+        // END colour-emoji patch
         var index: usize = 0;
         while (index < table_count) : (index += 1) {
             const record = 12 + index * 16;
@@ -149,6 +162,10 @@ pub const Face = struct {
             if (std.mem.eql(u8, tag, "glyf")) glyf = range;
             if (std.mem.eql(u8, tag, "hmtx")) hmtx = range;
             if (std.mem.eql(u8, tag, "hhea")) hhea = range;
+            // BEGIN colour-emoji patch
+            if (std.mem.eql(u8, tag, "COLR")) colr = range;
+            if (std.mem.eql(u8, tag, "CPAL")) cpal = range;
+            // END colour-emoji patch
         }
         const head_r = head orelse return error.FontParseFailed;
         const maxp_r = maxp orelse return error.FontParseFailed;
@@ -190,6 +207,7 @@ pub const Face = struct {
         // Pick a format-4 unicode subtable (platform 0, or 3/1).
         const subtable_count = try readU16(bytes, cmap_r.offset + 2);
         var cmap4: ?usize = null;
+        var cmap12: ?usize = null; // colour-emoji patch
         var sub: usize = 0;
         while (sub < subtable_count) : (sub += 1) {
             const record = cmap_r.offset + 4 + sub * 8;
@@ -199,6 +217,11 @@ pub const Face = struct {
             const format = try readU16(bytes, sub_offset);
             const unicode = platform == 0 or (platform == 3 and (encoding == 1 or encoding == 10));
             if (unicode and format == 4 and cmap4 == null) cmap4 = sub_offset;
+            // Colour-emoji patch: a format-12 subtable covers every plane, so
+            // it is preferred for lookups when present. Format 4 stays
+            // required, which keeps every face this parser already accepted
+            // accepted.
+            if (unicode and format == 12 and cmap12 == null) cmap12 = sub_offset;
         }
         const cmap4_offset = cmap4 orelse return error.FontParseFailed;
 
@@ -211,6 +234,11 @@ pub const Face = struct {
             .ascender = ascender,
             .descender = descender,
             .cmap4_offset = cmap4_offset,
+            // BEGIN colour-emoji patch
+            .cmap12_offset = cmap12,
+            .colr_offset = if (colr) |r| r.offset else null,
+            .cpal_offset = if (cpal) |r| r.offset else null,
+            // END colour-emoji patch
             .loca_offset = loca_r.offset,
             .loca_len = loca_r.len,
             .glyf_offset = glyf_r.offset,
@@ -220,9 +248,145 @@ pub const Face = struct {
         };
     }
 
+    // BEGIN colour-emoji patch (zig-nostr/native, see vercel-labs/native#421)
+
+    /// Glyph index from a format-12 subtable, or null when the codepoint is in
+    /// none of its groups. Format 12 is a sorted array of
+    /// (startCharCode, endCharCode, startGlyphID) run over by binary search.
+    fn glyphIndex12(self: *const Face, base: usize, codepoint: u32) ?u16 {
+        const group_count = readU32(self.bytes, base + 12) catch return null;
+        if (group_count == 0) return null;
+        var lo: u32 = 0;
+        var hi: u32 = group_count;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const group = base + 16 + @as(usize, mid) * 12;
+            const first = readU32(self.bytes, group) catch return null;
+            const last = readU32(self.bytes, group + 4) catch return null;
+            if (codepoint < first) {
+                hi = mid;
+            } else if (codepoint > last) {
+                lo = mid + 1;
+            } else {
+                const start_glyph = readU32(self.bytes, group + 8) catch return null;
+                const glyph = start_glyph + (codepoint - first);
+                if (glyph == 0 or glyph >= self.num_glyphs) return null;
+                return @intCast(glyph);
+            }
+        }
+        return null;
+    }
+
+    /// One layer of a colour glyph: an ordinary outline plus the palette entry
+    /// it is inked with.
+    pub const ColorLayer = struct {
+        glyph: u16,
+        /// Straight (non-premultiplied) RGBA, as `CPAL` stores it.
+        r: u8 = 0,
+        g: u8 = 0,
+        b: u8 = 0,
+        a: u8 = 0,
+        /// Palette index 0xFFFF: the layer asks for the CALLER's foreground
+        /// rather than a palette entry. A flag rather than an all-zero colour,
+        /// because transparent black is a legitimate palette entry.
+        use_text_color: bool = false,
+    };
+
+    /// True when the face carries `COLR`/`CPAL`, so its glyphs are stacks of
+    /// coloured outlines rather than one shape in the text colour. The one
+    /// thing that makes a face eligible to stand in for another's missing
+    /// glyphs (reference.referenceGlyphFor).
+    pub fn hasColorGlyphs(self: *const Face) bool {
+        // `!= null`, NOT `!= 0`: these are optionals, and `?usize != 0`
+        // compares against `@as(?usize, 0)`, so a null (monochrome) face
+        // reports true. It compiles, and it inverts the guard.
+        return self.colr_offset != null and self.cpal_offset != null;
+    }
+
+    /// How many colour layers this glyph draws as, or 0 when it is an ordinary
+    /// monochrome outline. `COLR` v0 only: v1's gradients and transforms are a
+    /// different format and are deliberately not read here.
+    pub fn colorLayerCount(self: *const Face, glyph: u16) u16 {
+        const base = self.colr_offset orelse return 0;
+        if (self.cpal_offset == null) return 0;
+        if ((readU16(self.bytes, base) catch return 0) != 0) return 0; // v0 only
+        const record_count = readU16(self.bytes, base + 2) catch return 0;
+        const records = base + (readU32(self.bytes, base + 4) catch return 0);
+        var lo: u16 = 0;
+        var hi: u16 = record_count;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const rec = records + @as(usize, mid) * 6;
+            const gid = readU16(self.bytes, rec) catch return 0;
+            if (glyph < gid) {
+                hi = mid;
+            } else if (glyph > gid) {
+                lo = mid + 1;
+            } else {
+                return readU16(self.bytes, rec + 4) catch 0;
+            }
+        }
+        return 0;
+    }
+
+    /// Layer `index` of a colour glyph, or null when it cannot be read. Layers
+    /// are drawn in order: the first is the bottom of the stack.
+    pub fn colorLayer(self: *const Face, glyph: u16, index: u16) ?ColorLayer {
+        const base = self.colr_offset orelse return null;
+        const palette = self.cpal_offset orelse return null;
+        const record_count = readU16(self.bytes, base + 2) catch return null;
+        const records = base + (readU32(self.bytes, base + 4) catch return null);
+        const layers = base + (readU32(self.bytes, base + 8) catch return null);
+
+        var first: ?u16 = null;
+        var count: u16 = 0;
+        var lo: u16 = 0;
+        var hi: u16 = record_count;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const rec = records + @as(usize, mid) * 6;
+            const gid = readU16(self.bytes, rec) catch return null;
+            if (glyph < gid) {
+                hi = mid;
+            } else if (glyph > gid) {
+                lo = mid + 1;
+            } else {
+                first = readU16(self.bytes, rec + 2) catch return null;
+                count = readU16(self.bytes, rec + 4) catch return null;
+                break;
+            }
+        }
+        const first_layer = first orelse return null;
+        if (index >= count) return null;
+
+        const layer = layers + (@as(usize, first_layer) + @as(usize, index)) * 4;
+        const layer_glyph = readU16(self.bytes, layer) catch return null;
+        const palette_index = readU16(self.bytes, layer + 2) catch return null;
+        // 0xFFFF means "the text colour", which is how a COLR font asks for the
+        // caller's own foreground rather than a palette entry.
+        if (palette_index == 0xFFFF) return .{ .glyph = layer_glyph, .use_text_color = true };
+
+        // CPAL v0: the first palette's colour records, BGRA, four bytes each.
+        const entries = readU16(self.bytes, palette + 2) catch return null;
+        if (palette_index >= entries) return null;
+        const records_offset = readU32(self.bytes, palette + 8) catch return null;
+        const first_index = readU16(self.bytes, palette + 12) catch return null;
+        const colour = palette + records_offset + (@as(usize, first_index) + @as(usize, palette_index)) * 4;
+        const bytes = readBytes(self.bytes, colour, 4) catch return null;
+        return .{ .glyph = layer_glyph, .b = bytes[0], .g = bytes[1], .r = bytes[2], .a = bytes[3] };
+    }
+
+    // END colour-emoji patch
+
     /// Glyph index for a unicode codepoint via the format-4 subtable;
     /// 0 (`.notdef`) when unmapped (callers fall back to block glyphs).
     pub fn glyphIndex(self: *const Face, codepoint: u32) u16 {
+        // BEGIN colour-emoji patch: try the format-12 subtable first when the
+        // face has one. It covers every plane, which is where the emoji are.
+        if (self.cmap12_offset) |base| {
+            if (self.glyphIndex12(base, codepoint)) |glyph| return glyph;
+        }
+        // END colour-emoji patch
         if (codepoint > 0xFFFF) return 0;
         const cp: u16 = @intCast(codepoint);
         const base = self.cmap4_offset;

@@ -1,0 +1,11 @@
+Twemoji-Receipt.ttf is a four-glyph subset of Twemoji Mozilla v0.7.0
+(https://github.com/mozilla/twemoji-colr), a COLR/CPAL build of Twemoji.
+
+Twemoji graphics are copyright Twitter, Inc and other contributors, licensed
+under CC-BY 4.0: https://creativecommons.org/licenses/by/4.0/
+
+The twemoji-colr build tooling is licensed under the Apache License 2.0.
+
+This file is a test fixture. It carries exactly four emoji plus .notdef so a
+COLR v0 face with a format-12 cmap can be exercised deterministically on every
+CI host without a multi-megabyte binary in the repository.
