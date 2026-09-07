@@ -4441,12 +4441,7 @@ int native_sdk_gtk_request_gpu_surface_frame(native_sdk_gtk_host_t *host, uint64
 }
 
 int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
-    (void)scale;
-    (void)has_dirty_rect;
-    (void)dirty_x;
-    (void)dirty_y;
-    (void)dirty_width;
-    (void)dirty_height;
+    /* BEGIN dirty-rect patch (zig-nostr/native) */
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
     native_sdk_gtk_native_view_t *view = native_sdk_find_native_view(win, label_copy);
@@ -4458,6 +4453,7 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
 
     const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, (int)width);
     if (stride <= 0) return 0;
+    int reallocated = 0;
     if (view->gpu_buf_width != (int)width || view->gpu_buf_height != (int)height || view->gpu_buf_stride != stride || !view->gpu_argb) {
         unsigned char *buffer = malloc((size_t)stride * height);
         if (!buffer) return 0;
@@ -4466,13 +4462,53 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
         view->gpu_buf_width = (int)width;
         view->gpu_buf_height = (int)height;
         view->gpu_buf_stride = stride;
+        reallocated = 1;
+    }
+
+    /* Only the rows and columns that changed.
+     *
+     * The runtime works out incremental dirty bounds and passes them in, and
+     * this host used to open by discarding all five arguments and converting
+     * the whole surface every frame: at 1400x900 that is 1.26 million pixels
+     * of RGBA8 -> premultiplied ARGB32 per frame, almost all of it recomputing
+     * bytes that already hold the right value. `rgba8` is always the full
+     * surface (the length check above requires it) and the reference renderer
+     * only re-inks its scissor rect, so everything outside the dirty rect is
+     * already correct in both buffers.
+     *
+     * The rect arrives in POINTS, so it is scaled to pixels, normalised in
+     * case of negative extents, floored and ceiled outward so a partially
+     * covered pixel is converted, and clamped to the surface. All of that is
+     * the shape upstream already ships for Windows in
+     * `native_sdk_windows_present_gpu_surface_pixels`; this is that code with
+     * cairo's premultiply instead of GDI's opaque BGRA.
+     *
+     * A freshly allocated buffer holds nothing, so it converts in full
+     * regardless of what the rect says.
+     *
+     * The REPAINT stays whole-widget. GTK 4 removed partial invalidation
+     * (`gtk_widget_queue_draw_area` is a GTK 3 API), so there is no way to ask
+     * for less than the widget; only the conversion above can be narrowed. */
+    size_t x0 = 0, y0 = 0, x1 = width, y1 = height;
+    const int partial_update = has_dirty_rect != 0 && !reallocated && scale > 0 && isfinite(scale) &&
+        isfinite(dirty_x) && isfinite(dirty_y) && isfinite(dirty_width) && isfinite(dirty_height);
+    if (partial_update) {
+        const double nx0 = fmin(dirty_x, dirty_x + dirty_width);
+        const double ny0 = fmin(dirty_y, dirty_y + dirty_height);
+        const double nx1 = fmax(dirty_x, dirty_x + dirty_width);
+        const double ny1 = fmax(dirty_y, dirty_y + dirty_height);
+        x0 = (size_t)fmax(0.0, fmin((double)width, floor(nx0 * scale)));
+        y0 = (size_t)fmax(0.0, fmin((double)height, floor(ny0 * scale)));
+        x1 = (size_t)fmax(0.0, fmin((double)width, ceil(nx1 * scale)));
+        y1 = (size_t)fmax(0.0, fmin((double)height, ceil(ny1 * scale)));
+        if (x1 <= x0 || y1 <= y0) { x0 = 0; y0 = 0; x1 = width; y1 = height; }
     }
 
     /* Straight RGBA8 -> premultiplied native-endian ARGB32 for cairo. */
-    for (size_t row = 0; row < height; row++) {
+    for (size_t row = y0; row < y1; row++) {
         const uint8_t *src = rgba8 + row * width * 4;
         uint32_t *dst = (uint32_t *)(view->gpu_argb + (size_t)row * (size_t)stride);
-        for (size_t col = 0; col < width; col++) {
+        for (size_t col = x0; col < x1; col++) {
             const uint32_t r = src[col * 4 + 0];
             const uint32_t g = src[col * 4 + 1];
             const uint32_t b = src[col * 4 + 2];
@@ -4512,6 +4548,7 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
     gtk_widget_queue_draw(view->widget);
     native_sdk_gpu_surface_schedule_frame_emission(view);
     return 1;
+    /* END dirty-rect patch */
 }
 
 int native_sdk_gtk_update_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_accessibility_label, const char *accessibility_label, size_t accessibility_label_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len) {
