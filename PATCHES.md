@@ -1,20 +1,31 @@
 # Why this fork exists
 
-This is a fork of [vercel-labs/native](https://github.com/vercel-labs/native)
-carrying two patches, both in the reference renderer, which is the renderer
-Linux and Windows present with:
+This is a fork of [vercel-labs/native](https://github.com/vercel-labs/native).
+Everything it carries is a gap that only shows up off macOS, where there is no
+platform text provider and no GPU presenter, so the toolkit's own software
+renderer is the whole of what a user sees.
 
-1. **Colour emoji** ([#421](https://github.com/vercel-labs/native/issues/421))
-2. **An app can fill the sans weight faces** ([#423](https://github.com/vercel-labs/native/issues/423))
+Every patch is filed upstream first and carried here so a release does not wait
+on somebody else's queue. When one lands upstream, its patch is dropped on the
+next rebase. When all of them have, the fork goes away and the dependency points
+back at `vercel-labs/native`.
 
-It exists to unblock a Linux release and is meant to be short-lived. When either
-change lands upstream, its patch is dropped on the next rebase; when both have,
-the fork goes away and the dependency points back at `vercel-labs/native`.
+## The tracker
 
-**Two is the cap.** The patches are cheap to carry (measured below) but the
-fork's exit depends on every patch it holds landing upstream, and it is already
-pinned to a tree older than upstream's current release. A third patch should
-lose to either an app-level workaround or waiting.
+| # | Patch | Upstream | Files touched | Drop it by |
+| --- | --- | --- | --- | --- |
+| 1 | Colour emoji | [#421](https://github.com/vercel-labs/native/issues/421) | `font_ttf.zig`, `reference.zig`, `canvas_font_tests.zig` | deleting everything between the `colour-emoji patch` markers, and Plaza's `hasColorGlyphs`/`colorLayerCount` calls in `src/tests.zig` |
+| 2 | An app can fill the sans weight faces | [#423](https://github.com/vercel-labs/native/issues/423) | `canvas/root.zig`, `canvas_fonts.zig`, `ui_app.zig`, `canvas_font_tests.zig` | deleting the `sans-variant-registration patch` markers |
+| 3 | Any registered face may lend a glyph | (filed with this patch) | `reference.zig`, `canvas_font_tests.zig` | restoring the `hasColorGlyphs` gate in `referenceGlyphFor` and reverting the Chinese receipt's last assertion |
+| 4 | The Linux present path honours the dirty rect | (filed with this patch) | `platform/linux/gtk_host.c` | deleting everything between the `dirty-rect patch` markers |
+
+**Checking whether a patch can go:** open the issue. If it is closed and the fix
+is in a release, rebase onto that release, drop the patch, run `zig build test`,
+and take the row out of this table. Nothing automated watches these; the list is
+short enough to read.
+
+**What each patch costs to carry** is below, patch by patch, so a rebase that
+conflicts can be judged rather than guessed at.
 
 ## Patch 1: colour emoji
 
@@ -57,14 +68,60 @@ spacing pretending to be weight. A registered face routes measurement through
 `estimateTextWidthForFace`, so ink and layout agree exactly instead of
 approximately.
 
-## The two rules patch 1 keeps
+## Patch 3: any registered face may lend a glyph
 
-**A font id still means the face it names.** The fallback is admitted only for
-a registered face that carries `COLR`, and only for a codepoint the named face
-has no glyph for. A colour face has no monochrome text to lend, so this cannot
-make one id draw with another's outlines. `canvas_font_tests` pins that
-property from both directions: the Chinese receipt, and a test that a
-monochrome face never lends its glyphs.
+Marked by the same `colour-emoji patch` markers, because it is one line inside
+the loop that patch added: `referenceGlyphFor` no longer skips a face that has
+no `COLR` table.
+
+Patch 1 admitted only colour faces, on the reasoning that a colour face has no
+monochrome text to lend, so it could not make one font id draw with another's
+outlines. That reasoning is sound and it is also the whole problem. Off macOS
+the bundled faces are the only glyph source and they carry Latin and Cyrillic
+(Greek is four maths symbols, not the alphabet). Greek, CJK, Japanese, Korean,
+Arabic, Hebrew, Thai and Devanagari have no glyph anywhere and are painted as
+solid filled rectangles. An app cannot fix that from outside, because a face it
+registers is only ever consulted for its own id.
+
+So the gate is coverage rather than colour. The named face is asked first and
+still wins every codepoint it carries; a registered face is consulted only for a
+codepoint nothing else could draw at all. What it costs is the property patch 1
+was careful to keep: one id can now draw one codepoint with another face's
+outlines. That is the point of it, and the alternative at that codepoint is not
+the right face, it is a filled rectangle.
+
+The Chinese receipt used to assert that the bundled id and the registered id
+draw DIFFERENT pixels, because the bundled one could only draw boxes. It now
+asserts the fallback instead: under the bundled id, the covered string and a
+string no registered face carries must differ. Restore the `hasColorGlyphs` gate
+and both become boxes and that fails, which is the probe.
+
+Not fixed by this, and worth saying before anyone treats a font as the whole
+answer: `Face.parse` reads no GSUB or GPOS and there is no bidi, so Arabic still
+comes out unjoined and left to right, and Devanagari and Thai unreordered.
+Coverage is one of the two problems.
+
+## Patch 4: the Linux present path honours the dirty rect
+
+Marked with `// BEGIN dirty-rect patch` in `src/platform/linux/gtk_host.c`.
+
+`native_sdk_gtk_present_gpu_surface_pixels` opened by discarding the five dirty
+arguments the runtime had just computed, then converted the whole surface from
+straight RGBA8 to premultiplied ARGB32 one pixel at a time. At 1400x900 that is
+1.26 million pixels per frame, almost all of them recomputing bytes that already
+held the right value. The incoming buffer is always the full surface and the
+reference renderer only re-inks its scissor rect, so everything outside the
+dirty rect is already correct in both buffers.
+
+It is upstream's own Windows implementation, one platform over: same normalise,
+same scale to pixels, same outward floor and ceil, same clamp. A freshly
+allocated buffer converts in full whatever the rect says.
+
+The REPAINT is still whole-widget and cannot be otherwise. GTK 4 removed partial
+invalidation, so `gtk_widget_queue_draw_area` is a GTK 3 API and there is no way
+to ask for less than the widget. Only the conversion narrows.
+
+## The rule patch 1 keeps
 
 **Layout and ink still agree.** Measurement never sees the fallback face, so it
 bills the codepoint from the text face's estimator. For the BMP symbol range
@@ -73,13 +130,17 @@ while an emoji face draws a full 1.0 em. A fallback glyph is scaled to the cell
 already charged for it, so nothing spills into the next character. The astral
 planes are already billed 1.0 em and pass through untouched.
 
+**What patch 3 gives up.** The other rule patch 1 kept, that a font id always
+means the face it names, is deliberately gone. See patch 3.
+
 ## Branches
 
 `colour-emoji` carries the patch on top of upstream `main`, which is the base an
 upstream change would want.
 
-`sdk-0.9.2-colour-emoji` carries the same commit on top of `8d0da34`, the SDK
-0.9.2 tree. **This is the branch Plaza consumes.** The automation protocol moved
+`sdk-0.9.2-linux-gaps` carries all four on top of `8d0da34`, the SDK 0.9.2
+tree. **This is the branch Plaza consumes.** (`sdk-0.9.2-colour-emoji` is what it
+consumed before patches 3 and 4, kept so an older pin still resolves.) The automation protocol moved
 between 0.9.2 and `main`, and the CLI and the framework have to agree on it, so
 taking `main` would mean bumping the CLI in the same breath. Keeping the patch on
 the pinned tree keeps the emoji fix separable from an SDK upgrade.
