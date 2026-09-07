@@ -1246,11 +1246,27 @@ fn referenceFaceForFontId(fonts: []const ReferenceFont, font_id: canvas.FontId) 
 /// carries `COLR` gets a second look, and only for a codepoint the named face
 /// has no glyph for.
 ///
-/// Narrow on purpose. Falling back to every registered face would make one
-/// font id able to draw with another's outlines, which is exactly the property
-/// `canvas_font_tests` pins (a CJK face registered under its own id, tofu
-/// everywhere else). A colour face has no monochrome text to lend, so
-/// admitting only those adds emoji coverage without moving that line.
+/// Any registered face may lend, not only a colour one.
+///
+/// This started narrow: only a face carrying `COLR` got a second look, on the
+/// reasoning that a colour face has no monochrome text to lend, so admitting
+/// only those adds emoji without letting one font id draw with another's
+/// outlines. That reasoning holds, and it is also the whole problem. Off macOS
+/// there is no platform text provider, so the bundled faces are the only glyph
+/// source, and they carry Latin and Cyrillic. Every other script, Greek, CJK,
+/// Japanese, Korean, Arabic, Hebrew, Thai, Devanagari, has no glyph anywhere
+/// and is painted as a solid block. An app cannot fix that from outside,
+/// because a face it registers is only ever consulted for its own id.
+///
+/// So the gate is coverage, not colour: the named face is asked first and
+/// still wins every codepoint it has, and a registered face is consulted only
+/// for a codepoint nothing else could draw. Registration order decides between
+/// two faces that both carry it.
+///
+/// The cost is the property this once pinned: a font id can now draw one
+/// codepoint with another face's outlines. That is the point, and it is
+/// bounded to codepoints the named face does not have at all, where the
+/// alternative is not "the right face" but a filled rectangle.
 fn referenceGlyphFor(
     fonts: []const ReferenceFont,
     font_id: canvas.FontId,
@@ -1262,7 +1278,6 @@ fn referenceGlyphFor(
 
     for (fonts) |font| {
         if (font.face == primary) continue;
-        if (!font.face.hasColorGlyphs()) continue;
         const glyph = font.face.glyphIndex(codepoint);
         if (glyph != 0) return .{ .face = font.face, .glyph = glyph, .fallback = true };
     }

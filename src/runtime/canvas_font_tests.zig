@@ -761,16 +761,20 @@ test "the Chinese receipt: a scaffold-shaped app registers a CJK face and render
     const provider = harness.runtime.textMeasureProvider().?;
     try std.testing.expect(provider.measureWidth(registered_font_id, 16.0, cjk_receipt_text) > 0);
 
-    // End-to-end pixels through the deterministic reference renderer —
-    // the same path Windows and Linux present. The registered face
-    // draws the string as real outlines; the same view under the
-    // bundled face can only draw notdef boxes, so the two screenshots
-    // MUST differ. That difference is the receipt: the Chinese text on
-    // screen came from the registered face, not tofu.
+    // End-to-end pixels through the deterministic reference renderer, the
+    // same path Windows and Linux present.
     const registered_shot = try fontFixtureScreenshot(harness, std.testing.allocator, registered_font_id);
     defer std.testing.allocator.free(registered_shot);
-    const tofu_shot = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
-    defer std.testing.allocator.free(tofu_shot);
+    // The SAME view under the BUNDLED sans id. This used to be the tofu
+    // control and was asserted to differ, because the bundled face maps none
+    // of these ideographs and could only draw notdef boxes. It borrows them
+    // from the registered face now, which is what the widened fallback is for,
+    // so it is a second real rendering rather than a control. Its pixels are
+    // not required to match `registered_shot`: the primary face decides the
+    // ADVANCES, and the bundled id measures CJK through the estimator, so the
+    // same outlines land in different places.
+    const bundled_shot = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(bundled_shot);
     var nonblank = false;
     var pixel: usize = 0;
     while (pixel + 4 <= registered_shot.len) : (pixel += 4) {
@@ -780,7 +784,6 @@ test "the Chinese receipt: a scaffold-shaped app registers a CJK face and render
         }
     }
     try std.testing.expect(nonblank);
-    try std.testing.expect(!std.mem.eql(u8, registered_shot, tofu_shot));
 
     // Self-calibrating tofu control: the bundled-face comparison above
     // proves the pixels changed with the face, not that they are real
@@ -807,6 +810,17 @@ test "the Chinese receipt: a scaffold-shaped app registers a CJK face and render
     const uncovered_shot = try fontFixtureScreenshot(harness, std.testing.allocator, registered_font_id);
     defer std.testing.allocator.free(uncovered_shot);
     try std.testing.expect(!std.mem.eql(u8, registered_shot, uncovered_shot));
+
+    // And the receipt for the FALLBACK, which is the same argument one id
+    // over. Under the bundled sans id, the covered string is drawn with
+    // outlines borrowed from the registered face; the uncovered string is
+    // drawn by nobody, because no registered face has those codepoints
+    // either, so it is genuine notdef boxes through the identical pipeline.
+    // The two must differ. Narrow the fallback back to colour faces only and
+    // both become boxes, and this fails.
+    const uncovered_bundled = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(uncovered_bundled);
+    try std.testing.expect(!std.mem.eql(u8, bundled_shot, uncovered_bundled));
 }
 
 // ------------------- late registration re-measures installed layouts
