@@ -138,18 +138,24 @@ means the face it names, is deliberately gone. See patch 3.
 `colour-emoji` carries the patch on top of upstream `main`, which is the base an
 upstream change would want.
 
-`sdk-0.9.2-linux-gaps` carries all four on top of `8d0da34`, the SDK 0.9.2
-tree. **This is the branch Plaza consumes.** (`sdk-0.9.2-colour-emoji` is what it
-consumed before patches 3 and 4, kept so an older pin still resolves.) The automation protocol moved
-between 0.9.2 and `main`, and the CLI and the framework have to agree on it, so
-taking `main` would mean bumping the CLI in the same breath. Keeping the patch on
-the pinned tree keeps the emoji fix separable from an SDK upgrade.
+`sdk-0.10.1-linux-gaps` carries all four on top of `v0.10.1`. **This is the
+branch Plaza and Notary consume.**
+
+A branch per SDK release rather than one that tracks `main`, because the
+automation protocol moves and the CLI and the framework have to agree on it: a
+mismatch does not fail the build, it silently breaks every live test. So an SDK
+upgrade is its own change, made deliberately, with the `native` CLI version
+bumped in the same commit as the pin.
+
+Earlier bases are kept so an older pin still resolves: `sdk-0.9.2-linux-gaps`
+(0.9.2 with all four) and `sdk-0.9.2-colour-emoji` (0.9.2 with the first two).
 
 ## Rebasing onto a new upstream release
 
 ```
-git fetch upstream
-git rebase upstream/main
+git fetch upstream --tags
+git checkout -b sdk-<version>-linux-gaps v<version>
+git cherry-pick -x <the patch commits, oldest first>
 zig build test
 ```
 
