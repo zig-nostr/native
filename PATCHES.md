@@ -16,8 +16,8 @@ back at `vercel-labs/native`.
 | --- | --- | --- | --- | --- |
 | 1 | Colour emoji | [#421](https://github.com/vercel-labs/native/issues/421) | `font_ttf.zig`, `reference.zig`, `canvas_font_tests.zig` | deleting everything between the `colour-emoji patch` markers, and Plaza's `hasColorGlyphs`/`colorLayerCount` calls in `src/tests.zig` |
 | 2 | An app can fill the sans weight faces | [#423](https://github.com/vercel-labs/native/issues/423) | `canvas/root.zig`, `canvas_fonts.zig`, `ui_app.zig`, `canvas_font_tests.zig` | deleting the `sans-variant-registration patch` markers |
-| 3 | Any registered face may lend a glyph | (filed with this patch) | `reference.zig`, `canvas_font_tests.zig` | restoring the `hasColorGlyphs` gate in `referenceGlyphFor` and reverting the Chinese receipt's last assertion |
-| 4 | The Linux present path honours the dirty rect | (filed with this patch) | `platform/linux/gtk_host.c` | deleting everything between the `dirty-rect patch` markers |
+| 3 | Any registered face may lend a glyph | [#421](https://github.com/vercel-labs/native/issues/421) (its own suggestion 2, [reported here](https://github.com/vercel-labs/native/issues/421#issuecomment-5576005547)) | `reference.zig`, `canvas_font_tests.zig` | restoring the `hasColorGlyphs` gate in `referenceGlyphFor` and reverting the Chinese receipt's last assertion |
+| 4 | The Linux present path honours the dirty rect | [#432](https://github.com/vercel-labs/native/issues/432) | `platform/linux/gtk_host.c` | deleting everything between the `dirty-rect patch` markers |
 
 **Checking whether a patch can go:** open the issue. If it is closed and the fix
 is in a release, rebase onto that release, drop the patch, run `zig build test`,
