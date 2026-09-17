@@ -90,7 +90,8 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     depth_limit = self.widget_layout_nodes[scroll_index].depth;
                     continue;
                 }
-                if (try self.applyCanvasWidgetScrollAxis(scroll_index, axis, delta, source, !has_scroll_parent)) |dirty| return dirty;
+                const outcome = try self.applyCanvasWidgetScrollAxis(scroll_index, axis, delta, source, !has_scroll_parent);
+                if (outcome.consumed) return outcome.dirty;
                 depth_limit = self.widget_layout_nodes[scroll_index].depth;
             }
             return null;
@@ -205,22 +206,45 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta: geometry.OffsetF, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
             const vertical = try self.applyCanvasWidgetScrollAxis(scroll_index, .vertical, delta.dy, source, allow_rubberband);
             const horizontal = try self.applyCanvasWidgetScrollAxis(scroll_index, .horizontal, delta.dx, source, allow_rubberband);
-            return unionOptionalRects(vertical, horizontal);
+            return unionOptionalRects(vertical.dirty, horizontal.dirty);
         }
 
-        pub fn applyCanvasWidgetScrollAxis(self: *RuntimeView, scroll_index: usize, comptime axis: canvas.ScrollAxis, delta: f32, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
-            if (scroll_index >= self.widget_layout_node_count) return null;
-            const scroll_node = self.widget_layout_nodes[scroll_index];
-            if (!canvasWidgetScrollableKind(scroll_node.widget.kind)) return null;
-            if (scroll_node.widget.kind == .textarea) {
-                if (!canvas.widgetScrollsAxis(scroll_node.widget, axis)) return null;
-                return applyCanvasWidgetTextareaScrollAxis(self, scroll_index, axis, delta, source);
+        // BEGIN wheel-ease patch (zig-nostr/native)
+        /// What one axis did with a scroll delta.
+        ///
+        /// This was a bare `?RectF`, where null meant BOTH "drew nothing" and
+        /// "did not take the event, give it to the region behind me". Those
+        /// are the same thing only while every scroll moves pixels in the
+        /// same breath it is handled. An eased notch does not: it arms a
+        /// travel that the next frame draws. Conflated, an armed ease reads
+        /// as a refusal, so the route walk hands the same notch to the parent
+        /// and one wheel click scrolls both the list and the page behind it.
+        pub const CanvasWidgetScrollOutcome = struct {
+            consumed: bool = false,
+            dirty: ?geometry.RectF = null,
+
+            pub const ignored: CanvasWidgetScrollOutcome = .{};
+
+            pub fn moved(rect: ?geometry.RectF) CanvasWidgetScrollOutcome {
+                return .{ .consumed = true, .dirty = rect };
             }
-            if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
-            if (!canvas.widgetScrollsAxis(scroll_node.widget, axis)) return null;
+        };
+        // END wheel-ease patch
+
+        pub fn applyCanvasWidgetScrollAxis(self: *RuntimeView, scroll_index: usize, comptime axis: canvas.ScrollAxis, delta: f32, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!CanvasWidgetScrollOutcome {
+            if (scroll_index >= self.widget_layout_node_count) return .ignored;
+            const scroll_node = self.widget_layout_nodes[scroll_index];
+            if (!canvasWidgetScrollableKind(scroll_node.widget.kind)) return .ignored;
+            if (scroll_node.widget.kind == .textarea) {
+                if (!canvas.widgetScrollsAxis(scroll_node.widget, axis)) return .ignored;
+                const textarea_dirty = try applyCanvasWidgetTextareaScrollAxis(self, scroll_index, axis, delta, source);
+                return if (textarea_dirty) |rect| .moved(rect) else .ignored;
+            }
+            if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return .ignored;
+            if (!canvas.widgetScrollsAxis(scroll_node.widget, axis)) return .ignored;
 
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
-            if (viewport.isEmpty()) return null;
+            if (viewport.isEmpty()) return .ignored;
 
             const state = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
             const current = state.axis(axis);
@@ -247,7 +271,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 },
             };
             self.widget_scroll_states[scroll_index] = state.withAxis(axis, next);
-            if (next.offset == current.offset) return null;
+            if (next.offset == current.offset) return .ignored;
 
             const offset_delta = next.offset - current.offset;
             switch (axis) {
@@ -264,7 +288,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
-            return self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame);
+            return .moved(self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame));
         }
 
         pub fn applyCanvasWidgetTextareaScroll(self: *RuntimeView, scroll_index: usize, delta_y: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
@@ -432,14 +456,14 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                             const target = self.widget_layout_nodes[target_index].frame.normalized();
                             const delta_y = canvasWidgetRevealAxisRequestedDelta(.vertical, target, viewport);
                             if (delta_y != 0) {
-                                dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .vertical, delta_y, .discrete, false));
+                                dirty = unionOptionalRects(dirty, (try self.applyCanvasWidgetScrollAxis(ancestor_index, .vertical, delta_y, .discrete, false)).dirty);
                             }
                         }
                         if (canvas.widgetScrollsAxis(ancestor.widget, .horizontal)) {
                             const target = self.widget_layout_nodes[target_index].frame.normalized();
                             const delta_x = canvasWidgetRevealAxisRequestedDelta(.horizontal, target, viewport);
                             if (delta_x != 0) {
-                                dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .horizontal, delta_x, .discrete, false));
+                                dirty = unionOptionalRects(dirty, (try self.applyCanvasWidgetScrollAxis(ancestor_index, .horizontal, delta_x, .discrete, false)).dirty);
                             }
                         }
                     }
