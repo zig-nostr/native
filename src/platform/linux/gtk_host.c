@@ -235,6 +235,30 @@ typedef struct native_sdk_gtk_native_view {
     int gpu_pointer_down;
     double gpu_pointer_x;
     double gpu_pointer_y;
+    /* BEGIN scroll-coalesce patch (zig-nostr/native) */
+    /* Scroll deltas waiting for their frame, and the ONE GLib source that
+     * will carry them out. Same shape as gpu_emit_source above and for the
+     * same reason: a producer that arrives while one is queued folds into
+     * it rather than arming a second.
+     *
+     * A scroll source is CONTINUOUS. A high-resolution wheel or a touchpad
+     * delivers 100-200 events a second, and every one of them used to be
+     * emitted on the spot, which meant a full engine dispatch (view rebuild,
+     * layout, display-list diff) inside the GTK signal handler. That work
+     * outlasts the gap to the next event, so GDK's input source at
+     * G_PRIORITY_DEFAULT was ready again the moment it returned and the main
+     * loop never descended to the idle band where the frame emission above
+     * lives. Measured on a real gesture: 138 input events a second, 2.4
+     * seconds between presented frames, timers still firing on time, and
+     * under half a core in use. The window was not too busy to draw, it was
+     * never asked. Coalescing is what makes the input source go quiet
+     * between events, which is what lets the idle band run at all. */
+    guint gpu_scroll_source;
+    uint64_t gpu_scroll_last_emit_ns;
+    double gpu_scroll_dx;
+    double gpu_scroll_dy;
+    uint32_t gpu_scroll_modifiers;
+    /* END scroll-coalesce patch */
     GtkIMContext *gpu_im_context;
     char *gpu_preedit_text;
     /* Window-drag region mirror (see native_sdk_gtk_drag_region_t),
@@ -1494,6 +1518,50 @@ static void native_sdk_gpu_pointer_leave(GtkEventControllerMotion *controller, g
     native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", modifiers);
 }
 
+/* BEGIN scroll-coalesce patch (zig-nostr/native) */
+/* One scroll event per frame interval, carrying everything that arrived
+ * since the last one. The deltas SUM, so nothing a reader did is lost or
+ * rescaled: coalescing changes when the engine hears about the gesture,
+ * never how far it went.
+ *
+ * Armed at G_PRIORITY_DEFAULT, deliberately, unlike the frame emission.
+ * This IS input, it stands where the per-event emission stood, and it must
+ * not be parked in the same idle band it exists to unblock. It cannot spin:
+ * it arms only when a delta is waiting and disarms on the flush, so between
+ * gestures there is no source at all. The idle law the frame scheduler
+ * follows is untouched. */
+static gboolean native_sdk_gpu_scroll_flush(gpointer data) {
+    native_sdk_gtk_native_view_t *view = data;
+    if (!view) return G_SOURCE_REMOVE;
+    view->gpu_scroll_source = 0;
+    const double delta_x = view->gpu_scroll_dx;
+    const double delta_y = view->gpu_scroll_dy;
+    view->gpu_scroll_dx = 0;
+    view->gpu_scroll_dy = 0;
+    if (!view->widget || !view->window || !view->window->host) return G_SOURCE_REMOVE;
+    if (delta_x == 0.0 && delta_y == 0.0) return G_SOURCE_REMOVE;
+    view->gpu_scroll_last_emit_ns = native_sdk_gpu_timestamp_ns();
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_SCROLL, view->gpu_pointer_x, view->gpu_pointer_y, 0, delta_x, delta_y, "", "", view->gpu_scroll_modifiers);
+    return G_SOURCE_REMOVE;
+}
+
+/* The frame-interval grid anchored at the last emission, which is exactly
+ * what native_sdk_gpu_surface_schedule_frame_emission does for frames. The
+ * first event of a gesture finds no recent emission and goes out on the
+ * next loop iteration, so nothing is added to the latency a reader feels
+ * at the start of a scroll; only the flood behind it is thinned. */
+static void native_sdk_gpu_scroll_schedule_flush(native_sdk_gtk_native_view_t *view) {
+    if (!view || !view->widget || !view->window || !view->window->host) return;
+    if (view->gpu_scroll_source) return;
+    const uint64_t now = native_sdk_gpu_timestamp_ns();
+    uint64_t delay_ns = 0;
+    if (view->gpu_scroll_last_emit_ns > 0 && now < view->gpu_scroll_last_emit_ns + NATIVE_SDK_GTK_GPU_FRAME_INTERVAL_NS) {
+        delay_ns = view->gpu_scroll_last_emit_ns + NATIVE_SDK_GTK_GPU_FRAME_INTERVAL_NS - now;
+    }
+    view->gpu_scroll_source = g_timeout_add_full(G_PRIORITY_DEFAULT, (guint)((delay_ns + 500000ull) / 1000000ull), native_sdk_gpu_scroll_flush, view, NULL);
+}
+/* END scroll-coalesce patch */
+
 static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, double dx, double dy, gpointer data) {
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return FALSE;
@@ -1509,7 +1577,15 @@ static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, doub
     delta_y *= 40.0;
 #endif
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
-    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_SCROLL, view->gpu_pointer_x, view->gpu_pointer_y, 0, delta_x, delta_y, "", "", modifiers);
+    /* BEGIN scroll-coalesce patch (zig-nostr/native) */
+    /* Accumulate and return. The whole cost of this handler is now an add,
+     * so GDK's input source drains its queue and goes quiet between events
+     * instead of staying ready across a dispatch that never ends. */
+    view->gpu_scroll_dx += delta_x;
+    view->gpu_scroll_dy += delta_y;
+    view->gpu_scroll_modifiers = modifiers;
+    native_sdk_gpu_scroll_schedule_flush(view);
+    /* END scroll-coalesce patch */
     return TRUE;
 }
 
@@ -1692,6 +1768,12 @@ static void native_sdk_teardown_gpu_surface_view(native_sdk_gtk_native_view_t *v
         g_source_remove(view->gpu_emit_source);
         view->gpu_emit_source = 0;
     }
+    /* BEGIN scroll-coalesce patch (zig-nostr/native) */
+    if (view->gpu_scroll_source) {
+        g_source_remove(view->gpu_scroll_source);
+        view->gpu_scroll_source = 0;
+    }
+    /* END scroll-coalesce patch */
     if (view->widget && view->kind == NATIVE_SDK_GTK_VIEW_GPU_SURFACE) {
         gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(view->widget), NULL, NULL, NULL);
         g_signal_handlers_disconnect_by_data(view->widget, view);
