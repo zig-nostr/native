@@ -258,6 +258,17 @@ typedef struct native_sdk_gtk_native_view {
     uint64_t gpu_scroll_last_emit_ns;
     double gpu_scroll_dx;
     double gpu_scroll_dy;
+    /* The pointer where the gesture IS, captured with the delta rather
+     * than read at flush time. Pointer motion still emits per event and
+     * rewrites gpu_pointer_x/y, so a wheel spin whose pointer crosses into
+     * another scroll region would otherwise hand that region the whole
+     * frame's accumulated delta. macOS snapshots the same way. */
+    double gpu_scroll_x;
+    double gpu_scroll_y;
+    /* Last writer for the frame. Nothing on the scroll path reads these
+     * today; a modifier changing mid-frame would be attributed to the
+     * whole of it, which is what to fix first if Ctrl+scroll ever means
+     * something here. */
     uint32_t gpu_scroll_modifiers;
     /* Events folded into the pending flush, and whether every one of them
      * came from a detented device (the kind the flush emits). */
@@ -1536,6 +1547,34 @@ static void native_sdk_gpu_pointer_leave(GtkEventControllerMotion *controller, g
  * it arms only when a delta is waiting and disarms on the flush, so between
  * gestures there is no source at all. The idle law the frame scheduler
  * follows is untouched. */
+/* The pacing clock for scroll emissions, and the reason this is not a
+ * bare timestamp. Stamping `now` would mean that a dispatch overrunning
+ * the frame interval leaves now > last + interval, so the next scroll
+ * event arms at delay 0 and the flush is ready on every main-loop
+ * iteration. That is the very starvation this patch exists to remove,
+ * wearing the flush's clothes instead of GDK's. Re-anchoring to the most
+ * recent grid point keeps the next delay inside (0, interval] no matter
+ * how long a dispatch ran, so an overrun degrades the scroll rate
+ * gracefully instead of collapsing the idle band again.
+ *
+ * It is `native_sdk_gpu_surface_advance_pacing_clock` applied to the
+ * scroll clock, and it runs BEFORE the emission for the same reason that
+ * one does: the emission dispatches into the engine, which may tear this
+ * view down, so nothing may touch `view` once it returns. */
+static void native_sdk_gpu_scroll_advance_pacing_clock(native_sdk_gtk_native_view_t *view) {
+    const uint64_t now = native_sdk_gpu_timestamp_ns();
+    if (view->gpu_scroll_last_emit_ns == 0) {
+        view->gpu_scroll_last_emit_ns = now;
+        return;
+    }
+    const uint64_t scheduled_ns = view->gpu_scroll_last_emit_ns + NATIVE_SDK_GTK_GPU_FRAME_INTERVAL_NS;
+    if (now < scheduled_ns) {
+        view->gpu_scroll_last_emit_ns = now;
+    } else {
+        view->gpu_scroll_last_emit_ns = scheduled_ns + ((now - scheduled_ns) / NATIVE_SDK_GTK_GPU_FRAME_INTERVAL_NS) * NATIVE_SDK_GTK_GPU_FRAME_INTERVAL_NS;
+    }
+}
+
 static gboolean native_sdk_gpu_scroll_flush(gpointer data) {
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return G_SOURCE_REMOVE;
@@ -1548,8 +1587,8 @@ static gboolean native_sdk_gpu_scroll_flush(gpointer data) {
     view->gpu_scroll_events = 0;
     if (!view->widget || !view->window || !view->window->host) return G_SOURCE_REMOVE;
     if (delta_x == 0.0 && delta_y == 0.0) return G_SOURCE_REMOVE;
-    view->gpu_scroll_last_emit_ns = native_sdk_gpu_timestamp_ns();
-    native_sdk_emit_gpu_surface_input(view, input_kind, view->gpu_pointer_x, view->gpu_pointer_y, 0, delta_x, delta_y, "", "", view->gpu_scroll_modifiers);
+    native_sdk_gpu_scroll_advance_pacing_clock(view);
+    native_sdk_emit_gpu_surface_input(view, input_kind, view->gpu_scroll_x, view->gpu_scroll_y, 0, delta_x, delta_y, "", "", view->gpu_scroll_modifiers);
     return G_SOURCE_REMOVE;
 }
 
@@ -1592,8 +1631,11 @@ static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, doub
     /* Accumulate and return. The whole cost of this handler is now an add,
      * so GDK's input source drains its queue and goes quiet between events
      * instead of staying ready across a dispatch that never ends. */
+    if (delta_x == 0.0 && delta_y == 0.0) return TRUE;
     view->gpu_scroll_dx += delta_x;
     view->gpu_scroll_dy += delta_y;
+    view->gpu_scroll_x = view->gpu_pointer_x;
+    view->gpu_scroll_y = view->gpu_pointer_y;
     view->gpu_scroll_modifiers = modifiers;
     /* A flush is detented only while EVERY event folded into it was: a
      * frame that mixed a wheel notch with continuous input is not a detent,
