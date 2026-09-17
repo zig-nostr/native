@@ -776,6 +776,21 @@ pub const ScrollOverscroll = enum {
 
 pub const ScrollPhysics = struct {
     wheel_multiplier: f32 = 1,
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    /// How long a DETENTED wheel notch takes to travel, in milliseconds.
+    /// Zero, the default, keeps the historical behaviour exactly: the notch
+    /// lands on the offset in one step and this whole mechanism is inert.
+    ///
+    /// A detent is discrete by construction. One notch is a fixed distance
+    /// however slowly it is delivered, so applying it to the offset directly
+    /// teleports the content and no frame rate can help, because no
+    /// intermediate position was ever computed. Continuous input (a touchpad,
+    /// a high-resolution wheel) has the opposite property and wants the
+    /// instant path it already has: it arrives pre-smoothed by the hardware.
+    /// So this is armed by the HOST saying the event was detented, not by
+    /// guessing from the delta.
+    wheel_ease_ms: u32 = 0,
+    // END wheel-ease patch
     wheel_velocity_scale: f32 = 60,
     deceleration_per_second: f32 = 0.86,
     stop_velocity: f32 = 5,
@@ -822,6 +837,67 @@ pub const ScrollAxis = enum {
     vertical,
 };
 
+// BEGIN wheel-ease patch (zig-nostr/native)
+/// A detented notch in flight: where it started, where it is going, and when
+/// it left. Sampled from real frame timestamps rather than stepped by a dt,
+/// so it lands on schedule whatever the frame rate is doing, and a frame gap
+/// (an occluded window, a long dispatch) resolves to the target exactly
+/// instead of overshooting or sprinting to catch up.
+pub const ScrollEaseAxis = struct {
+    target: f32 = 0,
+    start_offset: f32 = 0,
+    start_ns: u64 = 0,
+    /// Zero means no ease is running. It is the only liveness flag.
+    duration_ms: u32 = 0,
+
+    pub fn active(self: ScrollEaseAxis) bool {
+        return self.duration_ms > 0;
+    }
+
+    /// Quadratic ease-out. Chosen over the cubic the toolkit already carries
+    /// for its layout tweens by arithmetic rather than taste: at a 43ms frame
+    /// interval the cubic puts 20.8 points of a 40 point notch on the first
+    /// drawn frame and 0.1 on the last, which is the teleport this exists to
+    /// remove, only smaller. The quadratic spends 15.5 / 11.7 / 7.9 / 4.2 /
+    /// 0.7. It also tracks what a browser actually runs for a wheel notch to
+    /// within a few points over the whole travel, without carrying a spline
+    /// solver in a fork that has to rebase.
+    fn ease(t: f32) f32 {
+        const inv = 1 - t;
+        return 1 - inv * inv;
+    }
+
+    pub fn progressAt(self: ScrollEaseAxis, now_ns: u64) f32 {
+        if (!self.active()) return 1;
+        if (now_ns <= self.start_ns) return 0;
+        const elapsed_ms = @as(f32, @floatFromInt((now_ns - self.start_ns) / std.time.ns_per_ms));
+        return std.math.clamp(elapsed_ms / @as(f32, @floatFromInt(self.duration_ms)), 0, 1);
+    }
+
+    pub fn finishedAt(self: ScrollEaseAxis, now_ns: u64) bool {
+        return self.progressAt(now_ns) >= 1;
+    }
+
+    /// The drawn position at this instant. On the last frame this is the
+    /// target itself, exactly, with no asymptote left over.
+    pub fn offsetAt(self: ScrollEaseAxis, now_ns: u64) f32 {
+        const t = self.progressAt(now_ns);
+        if (t >= 1) return self.target;
+        return self.start_offset + (self.target - self.start_offset) * ease(t);
+    }
+};
+
+/// Both axes, mirroring `ScrollState`'s shape.
+pub const ScrollEase = struct {
+    x: ScrollEaseAxis = .{},
+    y: ScrollEaseAxis = .{},
+
+    pub fn active(self: ScrollEase) bool {
+        return self.x.active() or self.y.active();
+    }
+};
+// END wheel-ease patch
+
 /// The retained scroll physics of ONE axis: offset, wheel/kinetic
 /// velocity, and the extents that bound them. The two-axis `ScrollState`
 /// is a pair of these; every physics rule (clamping, rubber-band,
@@ -864,6 +940,46 @@ pub const ScrollAxisState = struct {
     pub fn needsKineticStep(self: ScrollAxisState, physics: ScrollPhysics) bool {
         return @abs(self.velocity) > nonNegative(physics.stop_velocity) or @abs(self.overscroll()) > @max(0.01, nonNegative(physics.rubberband_snap_distance));
     }
+
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    /// Arms or retargets an ease for a detented notch, or returns null when
+    /// there is nothing to do and the event should pass to the parent.
+    ///
+    /// The delta accumulates onto the pending TARGET, never onto the drawn
+    /// position. That is the whole composition rule, and it is the part every
+    /// implementation gets wrong: spinning the wheel faster than the ease
+    /// completes must not lose distance, and it cannot, because the target is
+    /// the only thing that ever receives a delta.
+    ///
+    /// Returning null for `target == base` covers a zero delta and a notch
+    /// into a hard edge with the same line, which is what lets the route walk
+    /// hand an exhausted region's notch to the region behind it.
+    pub fn wheelEase(self: ScrollAxisState, current: ScrollEaseAxis, delta: f32, physics: ScrollPhysics, now_ns: u64) ?ScrollEaseAxis {
+        if (physics.wheel_ease_ms == 0) return null;
+        const base = if (current.active()) current.target else self.offset;
+        const target = std.math.clamp(base + delta * physics.wheel_multiplier, 0, self.maxOffset());
+        if (target == base) return null;
+        return .{
+            .target = target,
+            // Where the content actually IS, which is mid-travel when a
+            // notch lands on top of another. Restarting from the pending
+            // target instead would jump.
+            .start_offset = self.offset,
+            .start_ns = now_ns,
+            .duration_ms = physics.wheel_ease_ms,
+        };
+    }
+
+    /// One frame of an armed ease. Velocity stays zero throughout: this is
+    /// commanded travel, not momentum, and letting the kinetic decay run
+    /// underneath it would add motion nobody asked for.
+    pub fn steppedEase(self: ScrollAxisState, current: ScrollEaseAxis, now_ns: u64) ScrollAxisState {
+        var next = self;
+        next.offset = current.offsetAt(now_ns);
+        next.velocity = 0;
+        return next.clamped();
+    }
+    // END wheel-ease patch
 
     fn applyWheelWithRubberband(self: ScrollAxisState, delta: f32, physics: ScrollPhysics, rubberband: bool) ScrollAxisState {
         var next = self;
