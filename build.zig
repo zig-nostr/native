@@ -988,6 +988,33 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "paint (GDK_PRIORITY_REDRAW," },
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "static void native_sdk_gpu_surface_schedule_frame_emission" },
     });
+    // BEGIN scroll-coalesce patch (zig-nostr/native)
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-scroll-input-is-coalesced", "Verify Linux scroll input is coalesced to one emission per frame interval", &.{
+        // Nothing executable reaches this. `native automate wheel`
+        // builds a .gpu_surface_input and calls dispatchPlatformEvent
+        // directly, so it never enters native_sdk_gpu_scroll, and the
+        // whole e2e battery passes whether this is right or not.
+        //
+        // What it pins: an emission per GTK scroll signal is a full
+        // synchronous engine dispatch, and at the 100-200 events a
+        // second a high-resolution wheel or a touchpad delivers, that
+        // work outlasts the gap to the next event. GDK's input source
+        // at G_PRIORITY_DEFAULT is then ready on every main-loop
+        // iteration and the frame emission above, which lives in the
+        // idle band on purpose, never runs. Measured before this
+        // landed: 7.5 seconds of frozen window in a 21 second gesture,
+        // worst gap 2116 ms, at 49% of one core with the timers still
+        // on time.
+        //
+        // The pacing clock is pinned with it. A bare timestamp would
+        // leave a dispatch that overran the interval arming the next
+        // flush at delay 0, which is the same starvation with the
+        // flush standing where GDK stood.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "view->gpu_scroll_source = g_timeout_add_full(G_PRIORITY_DEFAULT," },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "static gboolean native_sdk_gpu_scroll_flush" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "native_sdk_gpu_scroll_advance_pacing_clock(view);" },
+    });
+    // END scroll-coalesce patch
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-audio-buffering-clears-on-noop-resume", "Verify the Linux audio buffering flag drops when the 100% resume completes synchronously", &.{
         // The buffering flag normally drops at the PLAYING
         // state-changed message. When the refill's earlier PAUSED
