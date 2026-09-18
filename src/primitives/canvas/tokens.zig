@@ -982,8 +982,30 @@ pub const ScrollAxisState = struct {
             // target instead would jump.
             .start_offset = self.offset,
             .start_ns = now_ns,
-            .duration_ms = physics.wheel_ease_ms,
+            .duration_ms = easeDurationMs(current, physics, now_ns),
         };
+    }
+
+    /// How long THIS notch should take, given how fast they are arriving.
+    ///
+    /// A fixed duration accelerates on a fast spin, and it is worth being
+    /// precise about why. Every notch restarts the curve over the whole
+    /// remaining gap, so while notches arrive faster than the ease finishes,
+    /// the target runs ahead and the gap grows. Speed here is proportional to
+    /// the gap, so the content speeds up until the two balance: about 1.3
+    /// notches of lag at one per 100ms, about 2.3 at one per 50ms. Reported
+    /// as starting slow and then speeding up, which is exactly that ramp.
+    ///
+    /// Twice the observed gap between notches, floored at 50ms and never
+    /// longer than the token, holds the settled lag near 1.3 notches at any
+    /// rate instead of letting it grow with speed. It is the rule a browser
+    /// uses for the same problem. A notch arriving with nothing in flight
+    /// gets the full duration: there is no rate to measure yet.
+    fn easeDurationMs(current: ScrollEaseAxis, physics: ScrollPhysics, now_ns: u64) u32 {
+        if (!current.active() or now_ns <= current.start_ns) return physics.wheel_ease_ms;
+        const gap_ms = (now_ns - current.start_ns) / std.time.ns_per_ms;
+        const doubled = std.math.clamp(gap_ms * 2, 50, physics.wheel_ease_ms);
+        return @intCast(doubled);
     }
 
     /// One frame of an armed ease. Velocity stays zero throughout: this is
