@@ -154,21 +154,42 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             try settleDeferredCanvasWidgetAccessibility(self);
         }
 
-        pub fn advanceCanvasWidgetKineticScrollForFrame(self: *Runtime, view_index: usize, frame_interval_ns: u64, skip_step: bool) anyerror!void {
+        pub fn advanceCanvasWidgetKineticScrollForFrame(self: *Runtime, view_index: usize, frame_interval_ns: u64, skip_velocity: bool, now_ns: u64) anyerror!void {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;
             if (!self.views[view_index].canvasWidgetKineticScrollActive()) return;
 
-            if (skip_step) {
-                try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, view_index);
-                return;
-            }
-
-            _ = try self.stepCanvasWidgetKineticScroll(
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // This used to return here without stepping at all when input was
+            // pending, which was right while a wheel event moved the offset
+            // itself: the frame already had the new position. An eased notch
+            // moves nothing when it arrives, so skipping would leave every
+            // input-carrying frame drawing the position before it, which is
+            // the stutter this patch exists to remove.
+            //
+            // So the step always runs and `skip_velocity` only silences the
+            // DECAY, which a zero dt does by construction: `stepKinetic`
+            // multiplies velocity by `deceleration^0` (one) and advances the
+            // offset by `velocity * 0`. No new parameter, and the momentum
+            // behaviour is bit-identical to returning early.
+            _ = try self.stepCanvasWidgetKineticScrollAt(
                 self.views[view_index].window_id,
                 self.views[view_index].label,
-                canvasWidgetKineticScrollFrameMs(frame_interval_ns),
+                if (skip_velocity) 0 else canvasWidgetKineticScrollFrameMs(frame_interval_ns),
+                now_ns,
             );
+
+            // And keep the frames coming while a notch is still travelling.
+            // An ease draws across several frames and nothing else will ask
+            // for them: the notch that armed it moved no pixels. A fling is
+            // NOT included; it already gets its frames the way it always did,
+            // and asking on its behalf would request two where one is due.
+            // `skip_velocity` keeps the request the early return used to
+            // make: a frame with pending input still owes the next one.
+            if (skip_velocity or self.views[view_index].canvasWidgetScrollEaseActive()) {
+                try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, view_index);
+            }
+            // END wheel-ease patch
         }
 
         pub fn scheduleCanvasWidgetToggleAnimation(self: *Runtime, view_index: usize, animation: CanvasWidgetToggleAnimation) anyerror!void {

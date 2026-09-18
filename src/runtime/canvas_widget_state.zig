@@ -369,12 +369,20 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         }
 
         pub fn stepCanvasWidgetKineticScroll(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32) anyerror!platform.ViewInfo {
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // Clockless, so every existing caller keeps its exact behaviour:
+            // no ease is sampled and none is retired.
+            return stepCanvasWidgetKineticScrollAt(self, window_id, label, dt_ms, 0);
+        }
+
+        pub fn stepCanvasWidgetKineticScrollAt(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32, now_ns: u64) anyerror!platform.ViewInfo {
+            // END wheel-ease patch
             try validateRuntimeViewParent(self, window_id);
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
-            const dirty = try self.views[index].stepCanvasWidgetKineticScroll(dt_ms) orelse return self.views[index].info();
+            const dirty = try self.views[index].stepCanvasWidgetKineticScrollAt(dt_ms, now_ns) orelse return self.views[index].info();
             const previous_cursor = self.views[index].canvas_widget_cursor;
             try CanvasWidgetEventMethods(Runtime).reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, null);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try CanvasWidgetEventMethods(Runtime).syncCanvasWidgetCursorForView(self, index);

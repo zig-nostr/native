@@ -62,7 +62,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // profile's host stages while profiling is on.
                 if (frame_event.packet_decode_ns > 0) self.frame_profile.recordNs(.host_decode, frame_event.packet_decode_ns);
                 if (frame_event.packet_draw_ns > 0) self.frame_profile.recordNs(.host_draw, frame_event.packet_draw_ns);
-                try CanvasWidgetDisplayMethods().advanceCanvasWidgetKineticScrollForFrame(self, index, frame_event.frame_interval_ns, had_pending_input);
+                try CanvasWidgetDisplayMethods().advanceCanvasWidgetKineticScrollForFrame(self, index, frame_event.frame_interval_ns, had_pending_input, frame_event.timestamp_ns);
                 // Layout tweens step on the frame event's RECORDED
                 // timestamp (never a wall clock), so session replay
                 // reproduces identical layouts frame for frame. Stepped

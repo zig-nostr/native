@@ -892,6 +892,22 @@ pub const ScrollEase = struct {
     pub fn active(self: ScrollEase) bool {
         return self.x.active() or self.y.active();
     }
+
+    pub fn axisOf(self: ScrollEase, comptime which: ScrollAxis) ScrollEaseAxis {
+        return switch (which) {
+            .horizontal => self.x,
+            .vertical => self.y,
+        };
+    }
+
+    pub fn withAxis(self: ScrollEase, comptime which: ScrollAxis, ease: ScrollEaseAxis) ScrollEase {
+        var next = self;
+        switch (which) {
+            .horizontal => next.x = ease,
+            .vertical => next.y = ease,
+        }
+        return next;
+    }
 };
 // END wheel-ease patch
 

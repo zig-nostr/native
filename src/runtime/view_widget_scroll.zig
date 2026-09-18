@@ -13,6 +13,16 @@ const canvasWidgetSingleLineTextKind = canvas_widget_runtime.canvasWidgetSingleL
 pub const CanvasWidgetScrollSource = enum {
     discrete,
     wheel,
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    /// A wheel notch from a DETENTED device, which the host tells us about
+    /// because only the host can know. A detent is discrete by construction:
+    /// one notch is a fixed distance however slowly it arrives, so applying
+    /// it to the offset directly teleports the content and no frame rate can
+    /// help, since no intermediate position was ever computed. Continuous
+    /// input has the opposite property and keeps `.wheel`, which is instant
+    /// and correct for it: it arrives pre-smoothed by the hardware.
+    wheel_detented,
+    // END wheel-ease patch
 };
 
 /// Virtualized containers whose scroll offset stays MODEL-driven (the
@@ -49,6 +59,20 @@ fn canvasWidgetRevealAxisRequestedDelta(comptime axis: canvas.ScrollAxis, target
 
 pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
     return struct {
+        // BEGIN wheel-ease patch (zig-nostr/native)
+        /// Whether any axis is mid-notch. Narrower than
+        /// `canvasWidgetKineticScrollActive` on purpose: a fling already gets
+        /// its frames the way it always did, and asking for one on its behalf
+        /// too would request two frames where the engine asks for one.
+        pub fn canvasWidgetScrollEaseActive(self: *const RuntimeView) bool {
+            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+                if (node.widget.kind != .scroll_view) continue;
+                if (self.widget_scroll_eases[index].active()) return true;
+            }
+            return false;
+        }
+        // END wheel-ease patch
+
         pub fn canvasWidgetKineticScrollActive(self: *const RuntimeView) bool {
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(node.widget)) continue;
@@ -60,6 +84,12 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 const state = self.canvasWidgetScrollState(index, node, viewport);
                 if (canvas.widgetScrollsAxis(node.widget, .vertical) and state.axis(.vertical).needsKineticStep(physics)) return true;
                 if (canvas.widgetScrollsAxis(node.widget, .horizontal) and state.axis(.horizontal).needsKineticStep(physics)) return true;
+                // BEGIN wheel-ease patch (zig-nostr/native)
+                // An armed ease has to keep frames coming or it never runs:
+                // the notch moved nothing when it arrived, so without this
+                // there is no pending motion for anything else to notice.
+                if (self.widget_scroll_eases[index].active()) return true;
+                // END wheel-ease patch
             }
             return false;
         }
@@ -198,9 +228,19 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport).axis(axis);
             const max_offset = current.maxOffset();
-            if (current.offset < 0) return delta > 0;
-            if (current.offset > max_offset) return delta < 0;
-            return if (delta > 0) current.offset < max_offset else current.offset > 0;
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // Where this region is GOING, when it is going somewhere. Reading
+            // the drawn offset instead would let a region already easing to
+            // its own maximum report that it can still consume, clamp to an
+            // unchanged target, and leak the notch to its parent.
+            const reference = blk: {
+                const ease_axis = self.widget_scroll_eases[scroll_index].axisOf(axis);
+                break :blk if (ease_axis.active()) ease_axis.target else current.offset;
+            };
+            // END wheel-ease patch
+            if (reference < 0) return delta > 0;
+            if (reference > max_offset) return delta < 0;
+            return if (delta > 0) reference < max_offset else reference > 0;
         }
 
         pub fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta: geometry.OffsetF, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
@@ -258,8 +298,43 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             // pull it back.
             const physics = canvas.widgetScrollPhysics(scroll_node.widget, self.widget_tokens.scroll);
             const rubberband = allow_rubberband and !scroll_node.widget.runtime_flags.native_scroll;
+
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // A detented notch moves nothing NOW. It sets a target and a
+            // clock, and the frame step draws the travel. Consumed all the
+            // same: the region took the event, it simply has not drawn yet,
+            // and saying otherwise hands the same notch to the region behind
+            // this one.
+            //
+            // Rubber-band regions keep the instant path. The ease clamps to
+            // the content, so there is no excursion for a kinetic step to
+            // pull back, and mixing the two would fight.
+            if (source == .wheel_detented and physics.wheel_ease_ms > 0 and !rubberband and !scroll_node.widget.runtime_flags.native_scroll) {
+                const ease_axis = self.widget_scroll_eases[scroll_index].axisOf(axis);
+                // The same clock `canvasRenderAnimationStartNsForView` reads
+                // (view.zig), inlined because this file sits under view.zig
+                // and cannot import it back. The layout, disclosure and FLIP
+                // animations all start from this stamp, so an eased notch is
+                // on the same timebase as everything else that moves.
+                const start_ns = @max(self.gpu_input_timestamp_ns, self.gpu_timestamp_ns);
+                const armed = current.wheelEase(ease_axis, delta, physics, start_ns) orelse return .ignored;
+                self.widget_scroll_eases[scroll_index] = self.widget_scroll_eases[scroll_index].withAxis(axis, armed);
+                // Velocity stills on every eased notch, which keeps the
+                // documented rule that a gesture on one axis stops a flick on
+                // the other. An armed ease is commanded travel, not momentum.
+                var stilled = state;
+                stilled = stilled.withAxis(axis, blk: {
+                    var a = current;
+                    a.velocity = 0;
+                    break :blk a;
+                });
+                self.widget_scroll_states[scroll_index] = stilled;
+                return .{ .consumed = true, .dirty = null };
+            }
+            // END wheel-ease patch
+
             const next = switch (source) {
-                .wheel => if (rubberband)
+                .wheel, .wheel_detented => if (rubberband)
                     current.applyWheel(delta, physics)
                 else
                     current.applyWheelClamped(delta, physics),
@@ -271,6 +346,13 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 },
             };
             self.widget_scroll_states[scroll_index] = state.withAxis(axis, next);
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // Anything that writes the offset by another route retires the
+            // ease on that axis: a keyboard page, a reveal, a programmatic
+            // jump. Continuing to travel toward a target chosen before that
+            // would drag the region straight back off where it was put.
+            self.widget_scroll_eases[scroll_index] = self.widget_scroll_eases[scroll_index].withAxis(axis, .{});
+            // END wheel-ease patch
             if (next.offset == current.offset) return .ignored;
 
             const offset_delta = next.offset - current.offset;
@@ -314,7 +396,9 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     canvas.textInputContentWidthForWidget(widget, self.widget_tokens),
             };
             const next = switch (source) {
-                .wheel => current.applyWheelClamped(delta, self.widget_tokens.scroll),
+                // A textarea is not eased: it has no ScrollEase slot and its
+                // content is short, so a notch landing whole reads fine.
+                .wheel, .wheel_detented => current.applyWheelClamped(delta, self.widget_tokens.scroll),
                 .discrete => discrete: {
                     var state = current;
                     state.offset += delta;
@@ -547,6 +631,15 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
 
         pub fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // now_ns == 0 means "no clock supplied": sample no ease and leave
+            // every armed one exactly as it is. That is what keeps the eight
+            // existing call sites, all tests, byte-identical.
+            return self.stepCanvasWidgetKineticScrollAt(dt_ms, 0);
+        }
+
+        pub fn stepCanvasWidgetKineticScrollAt(self: *RuntimeView, dt_ms: f32, now_ns: u64) anyerror!?geometry.RectF {
+            // END wheel-ease patch
             var dirty: ?geometry.RectF = null;
             var changed = false;
 
@@ -567,9 +660,23 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 var next = current;
                 var moved = geometry.OffsetF{};
 
+                // BEGIN wheel-ease patch (zig-nostr/native)
+                const ease = self.widget_scroll_eases[scroll_index];
+                // END wheel-ease patch
                 if (canvas.widgetScrollsAxis(scroll_node.widget, .vertical)) {
                     const current_y = current.axis(.vertical);
-                    if (current_y.needsKineticStep(physics)) {
+                    // BEGIN wheel-ease patch (zig-nostr/native)
+                    // An armed ease outranks the decay: it is commanded travel
+                    // and the decay is leftover momentum, and running both
+                    // would add motion nobody asked for.
+                    if (now_ns != 0 and ease.y.active()) {
+                        const next_y = current_y.steppedEase(ease.y, now_ns);
+                        next = next.withAxis(.vertical, next_y);
+                        moved.dy = next_y.offset - current_y.offset;
+                        if (ease.y.finishedAt(now_ns)) {
+                            self.widget_scroll_eases[scroll_index].y = .{};
+                        }
+                    } else if (current_y.needsKineticStep(physics)) {
                         const next_y = current_y.stepKinetic(dt_ms, physics);
                         next = next.withAxis(.vertical, next_y);
                         moved.dy = next_y.offset - current_y.offset;
@@ -582,7 +689,15 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
                 if (canvas.widgetScrollsAxis(scroll_node.widget, .horizontal)) {
                     const current_x = current.axis(.horizontal);
-                    if (current_x.needsKineticStep(physics)) {
+                    // BEGIN wheel-ease patch (zig-nostr/native)
+                    if (now_ns != 0 and ease.x.active()) {
+                        const next_x = current_x.steppedEase(ease.x, now_ns);
+                        next = next.withAxis(.horizontal, next_x);
+                        moved.dx = next_x.offset - current_x.offset;
+                        if (ease.x.finishedAt(now_ns)) {
+                            self.widget_scroll_eases[scroll_index].x = .{};
+                        }
+                    } else if (current_x.needsKineticStep(physics)) {
                         const next_x = current_x.stepKinetic(dt_ms, physics);
                         next = next.withAxis(.horizontal, next_x);
                         moved.dx = next_x.offset - current_x.offset;

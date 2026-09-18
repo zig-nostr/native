@@ -2317,9 +2317,10 @@ test "gpu packet preserves authoritative text glyph positions" {
     // advance=11 — the compact v5 record DirectWrite consumes.
     const positioned_glyph_wire = [_]u8{
         0x41, 0x00, 0x00,
-        0x00, 0x00, 0x80, 0x40,
-        0x00, 0x00, 0xe8, 0x41,
-        0x00, 0x00, 0x30, 0x41,
+        0x00, 0x00, 0x80,
+        0x40, 0x00, 0x00,
+        0xe8, 0x41, 0x00,
+        0x00, 0x30, 0x41,
     };
     try std.testing.expect(std.mem.indexOf(u8, binary_writer.buffered(), &positioned_glyph_wire) != null);
 }
