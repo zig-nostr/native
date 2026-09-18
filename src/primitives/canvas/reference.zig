@@ -283,8 +283,110 @@ pub const ReferenceRenderSurface = struct {
         }
         var owned = self;
         owned.vector_policy = pass.gpu_plan_policy;
+        // BEGIN banded-raster patch (zig-nostr/native)
+        // Rows are split across cores when it is provably safe to do so. The
+        // machine this matters on has four and uses one.
+        if (referenceBandPlan(owned, pass)) |bands| {
+            return owned.renderPassBanded(pass, scale, scissor, bands);
+        }
+        // END banded-raster patch
         for (pass.commands) |command| try owned.renderCommand(referenceScaleCommand(command, scale), scissor);
     }
+
+    // BEGIN banded-raster patch (zig-nostr/native)
+    /// How many row bands this pass may be split into, or null to stay on one
+    /// thread. Four conditions, each of which is a real hazard rather than
+    /// caution.
+    ///
+    /// NO BLUR. `drawBlur` copies the entire surface into scratch and gathers
+    /// through a kernel apron, so it reads rows other bands own and does so
+    /// mid-pass. Every other command reads only the pixel it writes. A pass
+    /// carrying one stays sequential, whole.
+    ///
+    /// NO RENDER MEMO. It is shared mutable state across the whole surface. It
+    /// is null on every desktop host (only the mobile embed host wires one), so
+    /// this costs nothing where it is wanted.
+    ///
+    /// NO COMPILED VECTOR POLICY. Path, stroke and glyph fills call into it,
+    /// and it is the app's compiled TypeScript core: one heap and one result
+    /// buffer, entered from one thread. A pass that carries a policy stays
+    /// sequential, whole. Apps with a Zig core leave it null.
+    ///
+    /// AND ENOUGH ROWS TO BE WORTH IT. Bands below a few dozen rows spend more
+    /// on the spawn than they save.
+    fn referenceBandPlan(self: ReferenceRenderSurface, pass: CanvasRenderPass) ?usize {
+        if (self.render_memo != null) return null;
+        if (self.vector_policy != null) return null;
+        if (self.height < min_reference_band_rows * 2) return null;
+        for (pass.commands) |command| {
+            if (command.command == .blur) return null;
+        }
+        const cores = std.Thread.getCpuCount() catch return null;
+        if (cores < 2) return null;
+        const by_rows = self.height / min_reference_band_rows;
+        const bands = @min(@min(cores, max_reference_bands), by_rows);
+        return if (bands >= 2) bands else null;
+    }
+
+    /// One band's share of the pass: the same commands, in the same order,
+    /// against a scissor narrowed to its rows.
+    ///
+    /// Output is identical to the single-threaded pass, and that is a
+    /// consequence of the scissor contract rather than a hope. Every primitive
+    /// derives its writes from `referenceCommandBounds(command, scissor)` and
+    /// then `referencePixelRect`, so a band writes exactly the pixels the whole
+    /// pass would have written in those rows, and never a pixel outside them.
+    /// Bands own disjoint rows, so the threads never touch the same byte.
+    fn renderBandThread(self: ReferenceRenderSurface, pass: CanvasRenderPass, scale: f32, scissor: ?geometry.RectF, y0: usize, y1: usize, slot: *?Error) void {
+        const band = geometry.RectF.init(
+            0,
+            @floatFromInt(y0),
+            @floatFromInt(self.width),
+            @floatFromInt(y1 - y0),
+        );
+        const band_scissor = if (scissor) |outer| geometry.RectF.intersection(outer, band) else band;
+        if (band_scissor.isEmpty()) return;
+        for (pass.commands) |command| {
+            self.renderCommand(referenceScaleCommand(command, scale), band_scissor) catch |err| {
+                slot.* = err;
+                return;
+            };
+        }
+    }
+
+    fn renderPassBanded(self: ReferenceRenderSurface, pass: CanvasRenderPass, scale: f32, scissor: ?geometry.RectF, bands: usize) Error!void {
+        var threads: [max_reference_bands]std.Thread = undefined;
+        var errors: [max_reference_bands]?Error = @splat(null);
+        const rows = self.height / bands;
+        var spawned: usize = 0;
+
+        // The last band runs on THIS thread: one fewer spawn, and the caller
+        // has to wait for all of them anyway.
+        while (spawned + 1 < bands) : (spawned += 1) {
+            const y0 = spawned * rows;
+            threads[spawned] = std.Thread.spawn(.{}, renderBandThread, .{ self, pass, scale, scissor, y0, y0 + rows, &errors[spawned] }) catch break;
+        }
+        renderBandThread(self, pass, scale, scissor, spawned * rows, self.height, &errors[bands - 1]);
+        for (threads[0..spawned]) |thread| thread.join();
+
+        // A band that could not be spawned left its rows undrawn, so the
+        // remainder is rendered here rather than silently lost.
+        if (spawned + 1 < bands) {
+            var missed = spawned;
+            while (missed + 1 < bands) : (missed += 1) {
+                const y0 = missed * rows;
+                renderBandThread(self, pass, scale, scissor, y0, y0 + rows, &errors[missed]);
+            }
+        }
+        for (errors[0..bands]) |maybe| if (maybe) |err| return err;
+    }
+
+    /// Fewer rows than this and a band costs more to start than it saves.
+    const min_reference_band_rows: usize = 64;
+    /// More bands than this and the shares get small enough that the spawn
+    /// dominates on the machines this targets.
+    const max_reference_bands: usize = 8;
+    // END banded-raster patch
 
     pub fn pixelRgba8(self: ReferenceRenderSurface, x: usize, y: usize) [4]u8 {
         if (x >= self.width or y >= self.height) return .{ 0, 0, 0, 0 };
