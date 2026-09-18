@@ -3,7 +3,8 @@
 This is a fork of [vercel-labs/native](https://github.com/vercel-labs/native).
 Everything it carries is a gap that only shows up off macOS, where there is no
 platform text provider and no GPU presenter, so the toolkit's own software
-renderer is the whole of what a user sees.
+renderer is the whole of what a user sees, and where the engine's own scroll
+physics runs because no native scroll driver takes it.
 
 Every patch is filed upstream first and carried here so a release does not wait
 on somebody else's queue. When one lands upstream, its patch is dropped on the
@@ -19,6 +20,9 @@ back at `vercel-labs/native`.
 | 3 | Any registered face may lend a glyph | [#421](https://github.com/vercel-labs/native/issues/421) (its own suggestion 2, [reported here](https://github.com/vercel-labs/native/issues/421#issuecomment-5576005547)) | `reference.zig`, `canvas_font_tests.zig` | restoring the `hasColorGlyphs` gate in `referenceGlyphFor` and reverting the Chinese receipt's last assertion |
 | 4 | The Linux present path honours the dirty rect | [#432](https://github.com/vercel-labs/native/issues/432) | `platform/linux/gtk_host.c` | deleting everything between the `dirty-rect patch` markers |
 | 5 | Scroll input is coalesced to one event a frame | [#440](https://github.com/vercel-labs/native/issues/440) | `platform/linux/gtk_host.c` | deleting everything between the `scroll-coalesce patch` markers |
+| 6 | A detented wheel notch travels instead of teleporting | [#441](https://github.com/vercel-labs/native/issues/441) | `canvas/tokens.zig`, `canvas/events.zig`, `canvas/root.zig`, `runtime/view_widget_scroll.zig`, `runtime/view.zig`, `runtime/canvas_widget_{runtime,display,events,state}.zig`, `runtime/canvas_frame_helpers.zig`, `runtime/core.zig`, `runtime/gpu_surface_events.zig`, `platform/types.zig`, `platform/linux/{root.zig,gtk_host.c,gtk_host.h}` | deleting everything between the `wheel-ease patch` markers |
+| 7 | Fills stop doing per-pixel work that is loop-invariant or absent | [#442](https://github.com/vercel-labs/native/issues/442) | `canvas/reference.zig` | deleting everything between the `opaque-coverage patch` markers |
+| 8 | The rasteriser uses the cores it has | [#443](https://github.com/vercel-labs/native/issues/443) | `canvas/reference.zig` | deleting everything between the `banded-raster patch` markers |
 
 **Checking whether a patch can go:** open the issue. If it is closed and the fix
 is in a release, rebase onto that release, drop the patch, run `zig build test`,
@@ -178,6 +182,88 @@ accumulated, so a gesture's fling now starts from the last FRAME's delta instead
 of the last EVENT's. On macOS this is moot because native scroll drivers own the
 physics and `applyWheel` never runs. On Linux it is a real change in the glide,
 and an app that tunes `wheel_velocity_scale` should re-check it.
+
+## Patch 6: a detented wheel notch travels instead of teleporting
+
+Marked with `// BEGIN wheel-ease patch` across twelve files.
+Upstream [#441](https://github.com/vercel-labs/native/issues/441).
+
+`applyWheel` does `next.offset += delta`, which is right for a touchpad and
+wrong for a detented wheel. A detent is a fixed distance however slowly it
+arrives, so on Linux one notch teleports the feed 40 points in a 690 point
+viewport with no intermediate position ever computed. No frame rate fixes that,
+because there is nothing in between to draw.
+
+A detented notch now sets a target and a clock, and each frame samples
+`start + (target - start) * ease(elapsed / duration)` off the frame event's own
+timestamp. Deltas accumulate onto the TARGET, so spinning faster than the ease
+completes cannot lose distance. Duration is twice the observed gap between
+notches, floored at 50ms, capped at the token, because a fixed duration
+accelerates on a fast spin.
+
+Only a host can tell a detented wheel from a touchpad, so the flag travels from
+`gtk_host.c` to `WidgetPointerEvent` and defaults false: a host that says
+nothing gets the behaviour it had. macOS is nearly moot anyway, since AppKit
+owns the physics wherever `native_scroll` is stamped.
+
+**The largest patch here, and the one to watch on a rebase.** Two of its pieces
+are behaviour changes to shared paths rather than additions: the scroll axis
+returns `{consumed, dirty}` instead of `?RectF`, and
+`advanceCanvasWidgetKineticScrollForFrame` no longer skips the whole step when
+input is pending.
+
+**Two tests come with it** in `canvas_widget_scroll_tests.zig` and they are the
+only executable thing that reaches this. `native automate wheel` dispatches a
+`.gpu_surface_input` directly and never enters the GTK handler, so the rest of
+the battery passes whether this is right or wrong.
+
+## Patch 7: fills stop doing per-pixel work that is loop-invariant or absent
+
+Marked with `// BEGIN opaque-coverage patch` in `canvas/reference.zig`.
+Upstream [#442](https://github.com/vercel-labs/native/issues/442).
+
+Three reductions, all provably identical rather than approximate.
+
+A fully covered pixel takes `blendPixel` directly: `blendRgba8Coverage` already
+routes `cov >= 1` to `blendRgba8`, and scaling alpha by exactly 1.0 is identity
+in IEEE754.
+
+A square corner skips `referencePointInRoundedRect` entirely, which reduces to
+its own `containsPoint` when every radius is zero, and stops reconstructing
+`rect.normalized()` per pixel.
+
+An opaque solid fill becomes four byte writes: the sample is loop-invariant,
+and with `src_a == 1` the destination is arithmetically absent from the result,
+so the read before the blend buys nothing.
+
+Measured on Ubuntu 26.04 aarch64: `present` p50 29.3ms to 16.0ms, frame
+interval 43ms to 28ms. Minimum of three runs; that machine spreads 35%.
+
+## Patch 8: the rasteriser uses the cores it has
+
+Marked with `// BEGIN banded-raster patch` in `canvas/reference.zig`.
+Upstream [#443](https://github.com/vercel-labs/native/issues/443).
+
+Rows split into bands, each running the same commands in the same order against
+a scissor narrowed to its own rows. `present` p50 16.0ms to 7.1ms, frame
+interval 28ms to 18ms, so 36fps to 55fps, with CPU going from half of one core
+to about 150% across cores.
+
+Identical output follows from the scissor contract: every primitive derives its
+writes from `referenceCommandBounds` then `referencePixelRect`, so a band writes
+exactly the pixels the whole pass would have written in those rows and never one
+outside. Bands own disjoint rows.
+
+Three preconditions, each a hazard: no blur in the pass (it is the only command
+that reads anything but the pixel it writes, copying the whole surface into
+scratch), no render memo (shared mutable state, and null on every desktop host),
+and enough rows to be worth the spawn.
+
+**How identity was established, which is the part to keep on a rebase.** Almost
+every test surface is under 128 rows, so with the real threshold not one test
+takes this path and a green suite means nothing. Force
+`min_reference_band_rows` to 4, which bands every test surface across 8 threads,
+and run the whole suite including golden pixels. Then put it back.
 
 ## The rule patch 1 keeps
 
