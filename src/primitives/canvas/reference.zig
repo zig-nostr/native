@@ -342,13 +342,34 @@ pub const ReferenceRenderSurface = struct {
         // test (bit-identical on integer bounds); rounded fills take
         // the anti-aliased signed-distance coverage.
         const binary = referenceRadiusIsZero(radius);
+        // BEGIN opaque-coverage patch (zig-nostr/native)
+        // Square corners reduce to a plain containment test, and the whole of
+        // `referencePointInRoundedRect` is dead weight for them: with every
+        // radius zero, each of its four corner branches needs a point either
+        // left of `minX` or at/past `maxX`, and `containsPoint` has already
+        // excluded both, so it always falls through to `return true`. What is
+        // left is the containment test itself.
+        //
+        // It was running per pixel, and taking `rect.normalized()` with it:
+        // a rect construction, four clamps and eight comparisons for every
+        // pixel of every square fill. This app draws its full-size
+        // backgrounds as radius-0 rounded rects, so that is most of the
+        // pixels on screen, and `present` is 79% of a scroll frame.
+        //
+        // Hoisted, not replaced by a span: deriving the covered pixel span
+        // from the geometric rect means reproducing the pixel-center
+        // comparisons exactly, and getting that subtly wrong moves golden
+        // bytes. This form cannot: it is the same predicate, evaluated the
+        // same number of times, with the loop-invariant part lifted out.
+        const square_rect = if (binary) rect.normalized() else rect;
+        // END opaque-coverage patch
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
                 if (binary) {
-                    if (referencePointInRoundedRect(point, rect, radius)) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
+                    if (square_rect.containsPoint(point)) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
                     continue;
                 }
                 // BEGIN opaque-coverage patch (zig-nostr/native)
