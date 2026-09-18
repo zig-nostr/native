@@ -303,7 +303,12 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             // Rubber-band regions keep the instant path. The ease clamps to
             // the content, so there is no excursion for a kinetic step to
             // pull back, and mixing the two would fight.
-            if (source == .detented_wheel and physics.wheel_ease_ms > 0 and !rubberband and !scroll_node.widget.runtime_flags.native_scroll) {
+            // `rubberband` above only picks which entry point runs; the
+            // EFFECTIVE mode also needs the token to ask for bouncing. A
+            // region that can never overscroll is the ordinary case and must
+            // ease, which reading the flag alone got wrong.
+            const bounces = rubberband and physics.overscroll == .rubber_band;
+            if (source == .detented_wheel and physics.wheel_ease_ms > 0 and !bounces and !scroll_node.widget.runtime_flags.native_scroll) {
                 const ease_axis = self.widget_scroll_eases[scroll_index].axisOf(axis);
                 // The same clock `canvasRenderAnimationStartNsForView` reads
                 // (view.zig), inlined because this file sits under view.zig
