@@ -69,6 +69,10 @@ typedef struct {
     int button;
     double delta_x;
     double delta_y;
+    /* BEGIN wheel-ease patch (zig-nostr/native) */
+    /* Nonzero when a scroll came from a detented device. */
+    int scroll_detented;
+    /* END wheel-ease patch */
     const char *key_text;
     size_t key_text_len;
     const char *input_text;

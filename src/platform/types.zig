@@ -2140,6 +2140,13 @@ pub const GpuSurfaceInputEvent = struct {
     pressure: f32 = 0,
     delta_x: f32 = 0,
     delta_y: f32 = 0,
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    /// Whether a `.scroll` delta came from a DETENTED device. Hosts that do
+    /// not set it get exactly the behaviour they had, which is why false is
+    /// the default: only a host can tell a notched wheel from a touchpad,
+    /// and the engine eases the former and applies the latter at once.
+    scroll_detented: bool = false,
+    // END wheel-ease patch
     key: []const u8 = "",
     text: []const u8 = "",
     composition_cursor: ?usize = null,

@@ -325,6 +325,9 @@ pub fn canvasWidgetPointerEventFromGpuInput(input_event: GpuSurfaceInputEvent) ?
         .phase = phase,
         .point = geometry.PointF.init(input_event.x, input_event.y),
         .delta = geometry.OffsetF.init(input_event.delta_x, input_event.delta_y),
+        // BEGIN wheel-ease patch (zig-nostr/native)
+        .scroll_detented = input_event.scroll_detented,
+        // END wheel-ease patch
         .pointer_id = input_event.pointer_id,
         .button = input_event.button,
         .modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers),

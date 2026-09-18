@@ -73,6 +73,11 @@ const GtkEvent = extern struct {
     button: c_int,
     delta_x: f64,
     delta_y: f64,
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    /// Mirrors `scroll_detented` in `native_sdk_gtk_event_t`. This struct is
+    /// `extern` and laid out by the C header, so the two must stay in step.
+    scroll_detented: c_int,
+    // END wheel-ease patch
     key_text: [*]const u8,
     key_text_len: usize,
     input_text: [*]const u8,
@@ -698,6 +703,9 @@ fn gpuSurfaceInputEventFromGtkEvent(event: *const GtkEvent) platform_mod.GpuSurf
         .button = event.button,
         .delta_x = @floatCast(event.delta_x),
         .delta_y = @floatCast(event.delta_y),
+        // BEGIN wheel-ease patch (zig-nostr/native)
+        .scroll_detented = event.scroll_detented != 0,
+        // END wheel-ease patch
         .key = event.key_text[0..event.key_text_len],
         .text = event.input_text[0..event.input_text_len],
         .composition_cursor = if (event.has_composition_cursor != 0) event.composition_cursor else null,

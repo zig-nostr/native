@@ -9,6 +9,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_view = @import("view.zig");
+const view_widget_scroll = @import("view_widget_scroll.zig");
 const widget_bridge = @import("widget_bridge.zig");
 
 const canvasRenderAnimationStartNsForView = runtime_view.canvasRenderAnimationStartNsForView;
@@ -2171,7 +2172,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
 
-            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta, .wheel) orelse return;
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // A detented notch eases to its target; continuous input keeps
+            // the direct path, which is right for it. Only the host knows
+            // which this was.
+            const scroll_source: view_widget_scroll.CanvasWidgetScrollSource =
+                if (pointer_event.pointer.scroll_detented) .wheel_detented else .wheel;
+            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta, scroll_source) orelse return;
+            // END wheel-ease patch
             const previous_cursor = self.views[index].canvas_widget_cursor;
             try reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, pointer_event.pointer.point);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);

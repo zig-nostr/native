@@ -270,6 +270,14 @@ typedef struct native_sdk_gtk_native_view {
      * something here. */
     uint32_t gpu_scroll_modifiers;
     /* END scroll-coalesce patch */
+    /* BEGIN wheel-ease patch (zig-nostr/native) */
+    /* Whether the notches folded into the pending flush came from a
+     * detented device. GTK tells us per event through the scroll unit, and
+     * only a host can know it. Cleared whenever a continuous event joins the
+     * same flush: a frame that mixed both is not a detent, and treating it
+     * as one would ease a touchpad. */
+    int gpu_scroll_detented;
+    /* END wheel-ease patch */
     GtkIMContext *gpu_im_context;
     char *gpu_preedit_text;
     /* Window-drag region mirror (see native_sdk_gtk_drag_region_t),
@@ -1000,6 +1008,10 @@ static void native_sdk_emit_gpu_surface_input(native_sdk_gtk_native_view_t *view
         .button = button,
         .delta_x = delta_x,
         .delta_y = delta_y,
+        /* BEGIN wheel-ease patch (zig-nostr/native) */
+        /* Only a scroll carries it; every other kind sends the default. */
+        .scroll_detented = (input_kind == NATIVE_SDK_GTK_GPU_INPUT_SCROLL) ? view->gpu_scroll_detented : 0,
+        /* END wheel-ease patch */
         .key_text = key ? key : "",
         .key_text_len = key ? strlen(key) : 0,
         .input_text = text ? text : "",
@@ -1606,14 +1618,19 @@ static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, doub
     if (!view) return FALSE;
     double delta_x = dx;
     double delta_y = dy;
+    /* BEGIN wheel-ease patch (zig-nostr/native) */
+    int detented = 0;
+    /* END wheel-ease patch */
 #if GTK_CHECK_VERSION(4, 8, 0)
     if (gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_WHEEL) {
         delta_x *= 40.0;
         delta_y *= 40.0;
+        detented = 1;
     }
 #else
     delta_x *= 40.0;
     delta_y *= 40.0;
+    detented = 1;
 #endif
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
     /* BEGIN scroll-coalesce patch (zig-nostr/native) */
@@ -1626,6 +1643,14 @@ static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, doub
     view->gpu_scroll_x = view->gpu_pointer_x;
     view->gpu_scroll_y = view->gpu_pointer_y;
     view->gpu_scroll_modifiers = modifiers;
+    /* BEGIN wheel-ease patch (zig-nostr/native) */
+    /* A flush is detented only while EVERY event folded into it was. */
+    if (view->gpu_scroll_dx == delta_x && view->gpu_scroll_dy == delta_y) {
+        view->gpu_scroll_detented = detented;
+    } else if (!detented) {
+        view->gpu_scroll_detented = 0;
+    }
+    /* END wheel-ease patch */
     native_sdk_gpu_scroll_schedule_flush(view);
     /* END scroll-coalesce patch */
     return TRUE;

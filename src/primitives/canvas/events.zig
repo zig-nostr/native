@@ -46,6 +46,18 @@ pub const WidgetPointerEvent = struct {
     phase: WidgetPointerPhase,
     point: geometry.PointF,
     delta: geometry.OffsetF = .{},
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    /// Whether a `.wheel` delta came from a DETENTED device: a notched
+    /// mouse wheel rather than a touchpad or a high-resolution wheel.
+    ///
+    /// Only the host can know this, and it decides whether the delta is
+    /// eased to its target or applied at once. A detent is a fixed distance
+    /// however slowly it arrives, so applying it directly teleports; a
+    /// continuous source arrives pre-smoothed and wants the direct path.
+    /// False is the safe default: a host that says nothing gets exactly the
+    /// behaviour it had.
+    scroll_detented: bool = false,
+    // END wheel-ease patch
     captured_id: ?ObjectId = null,
     /// How many rapid same-spot primary clicks this pointer event is
     /// part of: 1 = plain click, 2 = double (text inputs select the
