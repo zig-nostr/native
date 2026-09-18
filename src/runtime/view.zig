@@ -490,6 +490,13 @@ pub const RuntimeView = struct {
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    /// A detented notch in flight, per node, parallel to the scroll states
+    /// above. It is deliberately NOT a field on `ScrollState`: that struct
+    /// mirrors a transpiled record field for field and is the `on_scroll`
+    /// payload, so growing it is an app-visible break.
+    widget_scroll_eases: [max_canvas_widget_nodes_per_view]canvas.ScrollEase = undefined,
+    // END wheel-ease patch
     /// Scroll nodes whose offset changed since the last app dispatch
     /// (wheel, kinetic, keyboard, accessibility): drained into
     /// `canvas_widget_scroll` events at the gpu-surface dispatch points.
@@ -886,6 +893,10 @@ pub const RuntimeView = struct {
     pub const canScrollCanvasWidgetIntoView = CanvasWidgetScrollMethods.canScrollCanvasWidgetIntoView;
     pub const scrollCanvasWidgetIntoView = CanvasWidgetScrollMethods.scrollCanvasWidgetIntoView;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    pub const stepCanvasWidgetKineticScrollAt = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScrollAt;
+    pub const canvasWidgetScrollEaseActive = CanvasWidgetScrollMethods.canvasWidgetScrollEaseActive;
+    // END wheel-ease patch
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
     pub const canvasWidgetScrollContentExtentX = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtentX;
     pub const translateCanvasWidgetScrollDescendants = CanvasWidgetScrollMethods.translateCanvasWidgetScrollDescendants;
@@ -1313,6 +1324,7 @@ pub const RuntimeView = struct {
         self.copyWidgetLayoutTree(source.widgetLayoutTree(), scratch) catch unreachable;
         self.widget_revision = source.widget_revision;
         @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
+        @memcpy(self.widget_scroll_eases[0..source.widget_layout_node_count], source.widget_scroll_eases[0..source.widget_layout_node_count]);
     }
 
     pub fn ensureLargeCanvasWidgetTextStorage(self: *RuntimeView, allocator: std.mem.Allocator) !void {

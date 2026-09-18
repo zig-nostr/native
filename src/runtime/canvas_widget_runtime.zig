@@ -137,6 +137,9 @@ pub const WidgetTextStorageRange = struct {
 pub const CanvasWidgetScrollReconcileEntry = struct {
     id: canvas.ObjectId = 0,
     state: canvas.ScrollState = .{},
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    ease: canvas.ScrollEase = .{},
+    // END wheel-ease patch
 };
 
 pub const CanvasWidgetControlReconcileEntry = struct {
@@ -683,6 +686,7 @@ pub fn collectCanvasWidgetControlReconcileEntries(
 pub fn collectCanvasWidgetScrollReconcileEntries(
     nodes: []const canvas.WidgetLayoutNode,
     states: []const canvas.ScrollState,
+    eases: []const canvas.ScrollEase,
     output: []CanvasWidgetScrollReconcileEntry,
 ) []const CanvasWidgetScrollReconcileEntry {
     var len: usize = 0;
@@ -690,11 +694,41 @@ pub fn collectCanvasWidgetScrollReconcileEntries(
     for (nodes[0..count], 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
         if (len >= output.len) break;
-        output[len] = .{ .id = node.widget.id, .state = states[index] };
+        output[len] = .{
+            .id = node.widget.id,
+            .state = states[index],
+            .ease = if (index < eases.len) eases[index] else .{},
+        };
         len += 1;
     }
     return output[0..len];
 }
+
+// BEGIN wheel-ease patch (zig-nostr/native)
+/// An in-flight notch survives a rebuild under exactly the rule an in-flight
+/// fling already follows: per axis, and only while that axis's offset of
+/// record survived. A model-driven jump means the app took the wheel, and
+/// resuming travel toward a target chosen before that jump would drag the
+/// region straight back off where it was just placed.
+pub fn canvasWidgetScrollEaseForLayoutNode(
+    node: canvas.WidgetLayoutNode,
+    previous: []const CanvasWidgetScrollReconcileEntry,
+) canvas.ScrollEase {
+    if (node.widget.kind != .scroll_view or node.widget.id == 0) return .{};
+    for (previous) |entry| {
+        if (entry.id != node.widget.id) continue;
+        var ease = canvas.ScrollEase{};
+        if (canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value == entry.state.offset_y) {
+            ease.y = entry.ease.y;
+        }
+        if (canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x == entry.state.offset_x) {
+            ease.x = entry.ease.x;
+        }
+        return ease;
+    }
+    return .{};
+}
+// END wheel-ease patch
 
 pub fn canvasWidgetScrollStateForLayoutNode(
     node: canvas.WidgetLayoutNode,

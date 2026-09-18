@@ -398,6 +398,10 @@ pub const ScrollPhysics = token_model.ScrollPhysics;
 pub const ScrollOverscroll = token_model.ScrollOverscroll;
 pub const ScrollState = token_model.ScrollState;
 pub const ScrollAxisState = token_model.ScrollAxisState;
+// BEGIN wheel-ease patch (zig-nostr/native)
+pub const ScrollEaseAxis = token_model.ScrollEaseAxis;
+pub const ScrollEase = token_model.ScrollEase;
+// END wheel-ease patch
 pub const ScrollAxis = token_model.ScrollAxis;
 pub const ScrollAxes = token_model.ScrollAxes;
 pub const VirtualListOptions = token_model.VirtualListOptions;

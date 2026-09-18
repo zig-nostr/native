@@ -1034,6 +1034,9 @@ pub const Runtime = struct {
     pub const canvasWidgetSemantics = CanvasWidgetStateMethods.canvasWidgetSemantics;
     pub const dispatchCanvasWidgetAccessibilityAction = CanvasWidgetStateMethods.dispatchCanvasWidgetAccessibilityAction;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetStateMethods.stepCanvasWidgetKineticScroll;
+    // BEGIN wheel-ease patch (zig-nostr/native)
+    pub const stepCanvasWidgetKineticScrollAt = CanvasWidgetStateMethods.stepCanvasWidgetKineticScrollAt;
+    // END wheel-ease patch
     pub const startCanvasWidgetLayoutTween = CanvasWidgetStateMethods.startCanvasWidgetLayoutTween;
     pub const advanceCanvasWidgetLayoutTweensForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetLayoutTweensForFrame;
     pub const advanceCanvasWidgetDisclosureTweenForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetDisclosureTweenForFrame;
