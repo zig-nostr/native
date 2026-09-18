@@ -321,6 +321,31 @@ pub const ReferenceRenderSurface = struct {
         // the pixel it writes, so no apron rows join the key.
         const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(1, command, value));
         if (self.memoReplay(probe, pixel_rect)) return;
+        // BEGIN opaque-coverage patch (zig-nostr/native)
+        // A solid colour samples the same everywhere, so the per-pixel
+        // `referenceSampleFill` call and its switch are loop-invariant; and
+        // when that colour is opaque the blend is a store. Together the inner
+        // loop of a background fill becomes four byte writes.
+        const constant_opaque: ?[4]u8 = switch (value.fill) {
+            .color => |color| referenceOpaqueBytes(color, command.opacity),
+            .linear_gradient => null,
+        };
+        if (constant_opaque) |bytes| {
+            var oy = pixel_rect.y;
+            while (oy < pixel_rect.y + pixel_rect.height) : (oy += 1) {
+                var ox = pixel_rect.x;
+                while (ox < pixel_rect.x + pixel_rect.width) : (ox += 1) {
+                    const index = (@as(usize, @intCast(oy)) * self.width + @as(usize, @intCast(ox))) * 4;
+                    self.pixels[index + 0] = bytes[0];
+                    self.pixels[index + 1] = bytes[1];
+                    self.pixels[index + 2] = bytes[2];
+                    self.pixels[index + 3] = bytes[3];
+                }
+            }
+            self.memoStore(probe, pixel_rect);
+            return;
+        }
+        // END opaque-coverage patch
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
@@ -365,6 +390,29 @@ pub const ReferenceRenderSurface = struct {
         // bytes. This form cannot: it is the same predicate, evaluated the
         // same number of times, with the loop-invariant part lifted out.
         const square_rect = if (binary) rect.normalized() else rect;
+        // And the same two reductions the plain rect fill takes: a solid
+        // colour is loop-invariant, and an opaque one makes the blend a
+        // store. This is the path Plaza's full-size backgrounds run down.
+        const square_opaque: ?[4]u8 = if (!binary) null else switch (value.fill) {
+            .color => |color| referenceOpaqueBytes(color, command.opacity),
+            .linear_gradient => null,
+        };
+        if (square_opaque) |bytes| {
+            var oy = pixel_rect.y;
+            while (oy < pixel_rect.y + pixel_rect.height) : (oy += 1) {
+                var ox = pixel_rect.x;
+                while (ox < pixel_rect.x + pixel_rect.width) : (ox += 1) {
+                    if (!square_rect.containsPoint(referencePixelCenter(ox, oy))) continue;
+                    const index = (@as(usize, @intCast(oy)) * self.width + @as(usize, @intCast(ox))) * 4;
+                    self.pixels[index + 0] = bytes[0];
+                    self.pixels[index + 1] = bytes[1];
+                    self.pixels[index + 2] = bytes[2];
+                    self.pixels[index + 3] = bytes[3];
+                }
+            }
+            self.memoStore(probe, pixel_rect);
+            return;
+        }
         // END opaque-coverage patch
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
@@ -1860,6 +1908,33 @@ fn rgba8ToColor(pixel: [4]u8) Color {
         @as(f32, @floatFromInt(pixel[3])) / 255.0,
     );
 }
+
+// BEGIN opaque-coverage patch (zig-nostr/native)
+/// The exact bytes `blendRgba8` produces when the source is fully opaque,
+/// or null when it is not and the destination still matters.
+///
+/// Not an approximation, and worth spelling out because it is the whole
+/// justification for skipping the read. With `src_a == 1`, `out_a` is
+/// `1 + dst_a * 0` = 1, and each channel is
+/// `(clamp(src.c) * 1 + dst_c * dst_a * 0) / 1`. Multiplying and dividing by
+/// exactly 1.0 is identity in IEEE754, so every output byte is a function of
+/// the source alone. The destination is not merely unlikely to matter, it is
+/// arithmetically absent.
+///
+/// What it buys: a read-modify-write of four bytes becomes a write, on a
+/// software rasteriser where `present` is 79% of a scroll frame and fills are
+/// most of it.
+fn referenceOpaqueBytes(src: Color, opacity: f32) ?[4]u8 {
+    const src_a = std.math.clamp(src.a * std.math.clamp(opacity, 0, 1), 0, 1);
+    if (src_a < 1) return null;
+    return .{
+        colorChannelToByte(std.math.clamp(src.r, 0, 1)),
+        colorChannelToByte(std.math.clamp(src.g, 0, 1)),
+        colorChannelToByte(std.math.clamp(src.b, 0, 1)),
+        colorChannelToByte(1),
+    };
+}
+// END opaque-coverage patch
 
 fn blendRgba8(dst: [4]u8, src: Color, opacity: f32) [4]u8 {
     const src_a = std.math.clamp(src.a * std.math.clamp(opacity, 0, 1), 0, 1);
