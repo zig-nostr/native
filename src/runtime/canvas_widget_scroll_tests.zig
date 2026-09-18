@@ -2150,3 +2150,163 @@ test "assistive steps on a both-axes region page its live axis" {
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value_x);
 }
+
+// BEGIN wheel-ease patch (zig-nostr/native)
+test "a detented notch travels across frames instead of landing at once" {
+    // Nothing else reaches this. Automation builds a `.gpu_surface_input` and
+    // dispatches it directly, so it never enters the GTK handler that decides
+    // an event was detented, and the whole battery passes whether the ease is
+    // right or wrong.
+    //
+    // What it pins: one notch is a fixed distance however slowly it arrives,
+    // so applying it to the offset directly teleports the content and no
+    // frame rate can help, because no intermediate position was ever
+    // computed. Reported as teeth on a gear rather than a sweeping hand.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-wheel-ease", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = context;
+            _ = runtime;
+            _ = event_value;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 44, 0, 32), .text = "Two" },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 88, 0, 32), .text = "Three" },
+        .{ .id = 5, .kind = .button, .frame = geometry.RectF.init(0, 132, 0, 32), .text = "Four" },
+        .{ .id = 6, .kind = .button, .frame = geometry.RectF.init(0, 176, 0, 32), .text = "Five" },
+    };
+    const scroll = canvas.Widget{ .id = 1, .kind = .scroll_view, .children = &children };
+    var nodes: [7]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", .{ .scroll = .{
+        .wheel_ease_ms = 200,
+        .wheel_velocity_scale = 0,
+        .stop_velocity = 1,
+    } });
+
+    const start_ns: u64 = 1_000_000_000;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = start_ns,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 80,
+        .scroll_detented = true,
+    } });
+
+    // The notch moves NOTHING on arrival. That is the whole change: the
+    // teleport is what a reader feels as a tooth.
+    {
+        const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqual(@as(f32, 0), retained.nodes[0].widget.value);
+    }
+
+    // Halfway through, quadratic ease-out has spent three quarters of it.
+    _ = try harness.runtime.stepCanvasWidgetKineticScrollAt(1, "canvas", 16, start_ns + 100_000_000);
+    {
+        const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectApproxEqAbs(@as(f32, 60), retained.nodes[0].widget.value, 0.01);
+    }
+
+    // And it lands on the target exactly, with no asymptote left over.
+    _ = try harness.runtime.stepCanvasWidgetKineticScrollAt(1, "canvas", 16, start_ns + 200_000_000);
+    {
+        const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectApproxEqAbs(@as(f32, 80), retained.nodes[0].widget.value, 0.01);
+    }
+}
+
+test "a notch arriving mid-travel adds to the target rather than restarting it" {
+    // The composition rule, and the one every implementation gets wrong.
+    // Spinning a wheel faster than the ease completes must not lose distance,
+    // and it cannot, because a delta only ever lands on the TARGET, never on
+    // the drawn position.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-wheel-ease-2", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = context;
+            _ = runtime;
+            _ = event_value;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 400, 0, 32), .text = "Far" },
+    };
+    const scroll = canvas.Widget{ .id = 1, .kind = .scroll_view, .children = &children };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", .{ .scroll = .{
+        .wheel_ease_ms = 200,
+        .wheel_velocity_scale = 0,
+        .stop_velocity = 1,
+    } });
+
+    const start_ns: u64 = 5_000_000_000;
+    const notch = platform.GpuSurfaceInputEvent{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = start_ns,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 40,
+        .scroll_detented = true,
+    };
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = notch });
+    _ = try harness.runtime.stepCanvasWidgetKineticScrollAt(1, "canvas", 16, start_ns + 100_000_000);
+
+    // A second notch lands while the first is still travelling.
+    var second = notch;
+    second.timestamp_ns = start_ns + 100_000_000;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = second });
+
+    // Long past both durations, the feed has travelled the full 80: nothing
+    // was dropped and nothing was double counted.
+    _ = try harness.runtime.stepCanvasWidgetKineticScrollAt(1, "canvas", 16, start_ns + 2_000_000_000);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 80), retained.nodes[0].widget.value, 0.01);
+}
+// END wheel-ease patch
