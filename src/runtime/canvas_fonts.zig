@@ -134,6 +134,8 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// variant ids, the rest of that range is reserved for built-in
         /// faces), `error.FontTooLarge` (over the per-font bound
         /// `canvas_limits.max_registered_canvas_font_bytes`),
+        /// `error.FontRegistrationTooLate` (a sans variant id, 3 to 6, after
+        /// a frame has been planned: register those before the first frame),
         /// `error.FontIdInUse` (ids are permanent; see the module doc),
         /// `error.FontRegistryFull` (all
         /// `canvas_limits.max_registered_canvas_fonts` registrations
@@ -147,6 +149,13 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// and draws text host-side but has no font registration seam, so
         /// the face could not be honored pixel-honestly).
         pub fn registerCanvasFont(self: *Runtime, id: canvas.FontId, ttf: []const u8) anyerror!void {
+            // BEGIN sans-variant-registration patch (zig-nostr/native)
+            // Ids 3 to 6 already draw from the bundled faces. A frame planned
+            // before the app fills one has its glyphs retained in the atlas
+            // under that id, and would keep serving the bundled outlines.
+            // Refuse the late fill rather than draw stale glyphs.
+            if (canvas.isFillableReservedFontId(id) and self.canvas_frame_planned) return error.FontRegistrationTooLate;
+            // END sans-variant-registration patch
             var bind_provider = false;
             const index = if (self.font_registry_policy) |policy| compiled: {
                 var scratch: [8]u64 = undefined;

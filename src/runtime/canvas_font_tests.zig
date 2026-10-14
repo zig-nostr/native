@@ -1413,4 +1413,17 @@ test "an app can fill the reserved sans variant ids, and only those" {
     const regular_after = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
     defer std.testing.allocator.free(regular_after);
     try std.testing.expect(std.mem.eql(u8, regular_after, regular_shot));
+
+    // Once a frame has been planned for presentation the glyph atlas holds
+    // glyphs for the bundled faces, so a late fill of ids 3 to 6 is refused
+    // with a clear error rather than serving stale glyphs. Other ids are
+    // unaffected.
+    const pixel_size = try harness.runtime.canvasScreenshotPixelSize(1, "canvas", null);
+    const present_pixels = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(present_pixels);
+    const present_scratch = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(present_scratch);
+    _ = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{ .full_repaint = true }, harness.runtime.canvasFrameScratchStorage(), present_pixels, present_scratch, (canvas.DesignTokens{}).colors.background);
+    try std.testing.expectError(error.FontRegistrationTooLate, harness.runtime.registerCanvasFont(canvas.default_sans_bold_font_id, mono_bytes));
+    try harness.runtime.registerCanvasFont(registered_font_id, mono_bytes);
 }
