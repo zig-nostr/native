@@ -66,12 +66,23 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
         // END wheel-ease patch
 
-        pub fn canvasWidgetKineticScrollActive(self: *const RuntimeView) bool {
+        pub fn canvasWidgetKineticScrollActive(self: *RuntimeView) bool {
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+                // BEGIN wheel-ease patch (zig-nostr/native)
+                // A region skipped below can never step, so an ease armed
+                // before it was skipped would stay armed and drag the offset
+                // when the region comes back. Clear it where it is skipped.
+                if (node.widget.kind == .scroll_view and (canvasWidgetModelDrivenVirtual(node.widget) or node.widget.runtime_flags.native_scroll)) {
+                    self.widget_scroll_eases[index] = .{};
+                }
+                // END wheel-ease patch
                 if (node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(node.widget)) continue;
                 // Native drivers own momentum + rubber-band recovery.
                 if (node.widget.runtime_flags.native_scroll) continue;
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+                // BEGIN wheel-ease patch (zig-nostr/native)
+                if (viewport.isEmpty()) self.widget_scroll_eases[index] = .{};
+                // END wheel-ease patch
                 if (viewport.isEmpty()) continue;
                 const physics = canvas.widgetScrollPhysics(node.widget, self.widget_tokens.scroll);
                 const state = self.canvasWidgetScrollState(index, node, viewport);
@@ -676,6 +687,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) {
                     // BEGIN wheel-ease patch (zig-nostr/native)
+                    self.widget_scroll_eases[scroll_index] = .{};
                     if (ease_only) continue;
                     // END wheel-ease patch
                     self.widget_scroll_states[scroll_index].velocity_y = 0;

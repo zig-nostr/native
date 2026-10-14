@@ -2485,6 +2485,66 @@ test "Home and End discard an armed ease instead of being dragged back by it" {
     try std.testing.expectEqual(bottom, (try harness.runtime.canvasWidgetLayout(1, "canvas")).nodes[0].widget.value);
 }
 
+test "a region that collapses with a notch armed drops the ease" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-wheel-ease-5", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = context;
+            _ = runtime;
+            _ = event_value;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 400, 0, 32), .text = "Far" },
+    };
+    const scroll = canvas.Widget{ .id = 1, .kind = .scroll_view, .children = &children };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", .{ .scroll = .{
+        .wheel_ease_ms = 200,
+        .wheel_velocity_scale = 0,
+        .stop_velocity = 1,
+    } });
+
+    const start_ns: u64 = 1_000_000_000;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = start_ns,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 40,
+        .scroll_is_detented = true,
+    } });
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_eases[0].active());
+    try std.testing.expect(harness.runtime.views[0].canvasWidgetKineticScrollActive());
+
+    harness.runtime.views[0].widget_layout_nodes[0].frame = geometry.RectF.init(0, 0, 0, 0);
+    try std.testing.expect(!harness.runtime.views[0].canvasWidgetKineticScrollActive());
+    try std.testing.expect(!harness.runtime.views[0].widget_scroll_eases[0].active());
+}
+
 test "stepping only the ease axes leaves momentum alone" {
     const TestApp = struct {
         fn app(self: *@This()) App {
