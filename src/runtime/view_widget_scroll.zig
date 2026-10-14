@@ -496,6 +496,11 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 next = next.withAxis(.horizontal, axis_state.clamped());
             }
             self.widget_scroll_states[scroll_index] = next;
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // Home/End set the offset directly, so an armed ease would drag it
+            // back toward its old target on the next frame.
+            self.widget_scroll_eases[scroll_index] = .{};
+            // END wheel-ease patch
             if (next.offset_y == current.offset_y and next.offset_x == current.offset_x) return null;
 
             self.widget_layout_nodes[scroll_index].widget.value = next.offset_y;
