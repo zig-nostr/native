@@ -20,14 +20,14 @@ when the next release contains it.
 
 | # | Patch | Upstream | Status on v0.11.0 | Files touched | Drop it by |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Colour emoji | [#421](https://github.com/vercel-labs/native/issues/421) | carried | `font_ttf.zig`, `reference.zig`, `canvas_font_tests.zig` | deleting everything between the `colour-emoji patch` markers, and Plaza's `hasColorGlyphs`/`colorLayerCount` calls in `src/tests.zig` |
-| 2 | An app can fill the sans weight faces | [#423](https://github.com/vercel-labs/native/issues/423) | carried, narrower: upstream [#688](https://github.com/vercel-labs/native/pull/688) bundles the weights, an app still cannot register ids 3 to 6 | `canvas/root.zig`, `canvas_fonts.zig`, `ui_app.zig`, `canvas_font_tests.zig`, `tests/ts-core/font_registry_e2e_tests.zig` | deleting the `sans-variant-registration patch` markers |
+| 1 | Colour emoji | [#421](https://github.com/vercel-labs/native/issues/421) | carried | `font_ttf.zig`, `reference.zig`, `canvas_font_tests.zig` | deleting everything between the `colour-emoji patch` markers in `font_ttf.zig` and `reference.zig`, then the three tests in `canvas_font_tests.zig` and the `COLR` fixture in `testdata/fonts` (neither carries markers), and Plaza's `hasColorGlyphs`/`colorLayerCount` calls in `src/tests.zig` |
+| 2 | An app can fill the sans weight faces | [#423](https://github.com/vercel-labs/native/issues/423) | carried, narrower: upstream [#688](https://github.com/vercel-labs/native/pull/688) bundles the weights, an app still cannot register ids 3 to 6 | `canvas/root.zig`, `runtime/canvas_fonts.zig`, `runtime/core.zig`, `runtime/canvas_frame.zig`, `runtime/ui_app.zig`, `canvas_font_tests.zig`, `tests/ts-core/font_registry_e2e_tests.zig` | deleting everything between the `sans-variant-registration patch` markers (the e2e test is marked; the test in `canvas_font_tests.zig` is not and goes by hand) |
 | 3 | Any registered face may lend a glyph | [#421](https://github.com/vercel-labs/native/issues/421) (its own suggestion 2, [reported here](https://github.com/vercel-labs/native/issues/421#issuecomment-5576005547)) | carried | `reference.zig`, `canvas_font_tests.zig` | restoring the `hasColorGlyphs` gate in `referenceGlyphFor` and reverting the Chinese receipt's last assertion |
 | 4 | The Linux present path honours the dirty rect | [#432](https://github.com/vercel-labs/native/issues/432) | dropped, fixed upstream by [#434](https://github.com/vercel-labs/native/pull/434) | none | already gone |
 | 5 | Scroll input is coalesced to one event a frame | [#440](https://github.com/vercel-labs/native/issues/440) | carried, rebased onto #434 and #470 | `platform/linux/gtk_host.c`, `build.zig` | deleting everything between the `scroll-coalesce patch` markers |
 | 6 | A detented wheel notch travels instead of teleporting | [#441](https://github.com/vercel-labs/native/issues/441) | carried, narrower: upstream [#470](https://github.com/vercel-labs/native/pull/470) supplies the detented flag and the no-fling rule, the travel is ours | `canvas/tokens.zig`, `canvas/root.zig`, `runtime/view_widget_scroll.zig`, `runtime/view.zig`, `runtime/canvas_widget_{runtime,display,state}.zig`, `runtime/view_widget_tree.zig`, `runtime/core.zig`, `runtime/gpu_surface_events.zig`, `runtime/canvas_widget_scroll_tests.zig` | deleting everything between the `wheel-ease patch` markers |
 | 7 | Fills stop doing per-pixel work that is loop-invariant or absent | [#442](https://github.com/vercel-labs/native/issues/442) | carried | `canvas/reference.zig` | deleting everything between the `opaque-coverage patch` markers |
-| 8 | The rasteriser uses the cores it has | [#443](https://github.com/vercel-labs/native/issues/443) | carried, reapplied onto the new `renderPass`, and skipped for a pass that carries a compiled vector policy | `canvas/reference.zig` | deleting everything between the `banded-raster patch` markers |
+| 8 | The rasteriser uses the cores it has | [#443](https://github.com/vercel-labs/native/issues/443) | carried, reapplied onto the new `renderPass`, on a persistent worker pool, and skipped for a pass that carries a compiled vector policy or a compiled text measure | `canvas/reference.zig`, `canvas/render_tests.zig`, `runtime/canvas_frame.zig` | deleting everything between the `banded-raster patch` markers, and the two `withSerialMeasure` calls in `runtime/canvas_frame.zig` (unmarked) |
 
 **Checking whether a patch can go:** open the issue. If it is closed and the fix
 is in a release, rebase onto that release, drop the patch, run `zig build test`,
@@ -81,6 +81,15 @@ so there is no generated or compiled output to keep in sync. The native fallback
 path in the same function gets the same exception, and the e2e test registers
 ids 3 to 6 and checks ids 1, 2, 7 and 63 stay refused, on both paths, with
 identical resulting state.
+
+**Registration order.** Ids 3 to 6 already draw from bundled faces, and the glyph
+atlas retains glyphs under those ids once a frame has been planned for
+presentation. A fill after that would keep serving the bundled outlines, so
+`registerCanvasFont` refuses it with `error.FontRegistrationTooLate`. Register
+the faces before the first frame; ids of 64 and above are not affected.
+
+**Capacity.** Fills of ids 3 to 6 take slots from the same registry as every
+other face, so four fills use half of `max_registered_canvas_fonts` (8).
 
 Not covered: `src/app_runner/ts_core_main.zig` still requires font asset ids of
 64 or more for TypeScript-core apps. This patch is for the Zig `UiApp` path.
@@ -138,7 +147,8 @@ tells the engine a notch is detented by emitting scroll kind 15 from
 the flush, so the flush has to carry that kind. It does so only while every
 event folded into it was a detented one (`gpu_scroll_events` and
 `gpu_scroll_all_detented` on the view), so a frame that mixed a wheel notch
-with a touchpad is not treated as a notch.
+with a touchpad is not treated as a notch. The `build.zig` check pins both the
+kind selection in the flush and the fold that maintains the flag.
 
 `native_sdk_gpu_scroll` emitted on every GTK scroll signal, and an emission is a
 synchronous dispatch into the engine: view rebuild, layout, display-list diff,
@@ -261,30 +271,53 @@ Upstream [#443](https://github.com/vercel-labs/native/issues/443).
 Rows split into bands, each running the same commands in the same order against
 a scissor narrowed to its own rows. `present` p50 16.0ms to 7.1ms, frame
 interval 28ms to 18ms, so 36fps to 55fps, with CPU going from half of one core
-to about 150% across cores.
+to about 150% across cores. Those numbers were taken with a thread spawned per
+band per frame; the pool below replaces that and has not been re-measured.
 
 Identical output follows from the scissor contract: every primitive derives its
 writes from `referenceCommandBounds` then `referencePixelRect`, so a band writes
 exactly the pixels the whole pass would have written in those rows and never one
-outside. Bands own disjoint rows.
+outside. Bands own disjoint rows, and every band is rendered exactly once.
 
-Four preconditions, each a hazard: no blur in the pass (it is the only command
+**A persistent pool, not a spawn per frame.** The glyph rasteriser scratch is a
+`LazyTls` allocation of about 508 KiB from the page allocator that lives until
+process exit. A thread spawned every frame that drew text leaked one each time.
+The workers are now created once per process, on first use, sized from a cached
+cpu count (at most 7 plus the calling thread), with a 4 MiB stack, so each
+worker's scratch is made once and reused. Each worker is handed one band per
+frame and the calling thread renders the last band and waits for the rest.
+
+**When the pool is not available** the whole pass renders sequentially on the
+calling thread, so nothing is drawn twice and nothing is skipped. That covers a
+pool that is busy with another pass, a pool that could not start any worker, and
+the test hook `band_pool_enabled`. If only some workers start, the pass is split
+into as many bands as there are threads.
+
+Five preconditions, each a hazard: no blur in the pass (it is the only command
 that reads anything but the pixel it writes, copying the whole surface into
 scratch), no render memo (shared mutable state, and null on every desktop host),
-no compiled vector policy, and enough rows to be worth the spawn.
+no compiled vector policy, no compiled text measure, and enough rows to be worth
+it.
 
 **The vector policy is new on v0.11.0.** `renderPass` now builds an `owned`
 surface carrying the pass's `gpu_plan_policy`, and path, stroke and glyph fills
 call into it. It is the app's compiled TypeScript core, which has one heap and
 one result buffer and is entered from one thread, so a pass that carries one
-stays sequential. Apps with a Zig core, which is every app that consumes this
-fork today, leave it null and band as before. The bands run against `owned`.
+stays sequential. Colour glyphs now pass the policy too, as monochrome glyphs do.
+
+**The compiled text measure.** Text drawn without shaped glyphs walks per-cluster
+advances through the runtime's measure function, which enters the compiled core
+whenever the runtime has a `text_cache_policy`. The runtime sets
+`serial_measure` on the surface in that case and the pass stays sequential.
+Apps with a Zig core leave both unset and band as before.
 
 **How identity was established, which is the part to keep on a rebase.** Almost
 every test surface is under 128 rows, so with the real threshold not one test
 takes this path and a green suite means nothing. Force
 `min_reference_band_rows` to 4, which bands every test surface across 8 threads,
-and run the whole suite including golden pixels. Then put it back.
+and run the whole suite including golden pixels. Then put it back. A test in
+`render_tests.zig` also renders one scene sequentially, banded, and with the pool
+disabled, and requires the same bytes.
 
 ## The rule patch 1 keeps
 
@@ -341,4 +374,4 @@ neutering either half fails its own test and only its own test.
 Note which codepoint that test uses and why. U+2764 is in the BMP symbol range,
 the only class where the estimator and an emoji face disagree. An astral emoji
 cannot detect the fitting's absence, so a test written with one would pass
-either way — which is exactly the hole this test was added to close.
+either way, which is exactly the hole this test was added to close.

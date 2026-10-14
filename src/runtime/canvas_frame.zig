@@ -1187,7 +1187,9 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // diagnostic previews and screenshots re-plan without
             // presenting and would double-count. No-op unless profiling
             // is on.
+            // BEGIN sans-variant-registration patch (zig-nostr/native)
             if (record) self.canvas_frame_planned = true;
+            // END sans-variant-registration patch
             const plan_begin = if (record) self.frame_profile.begin() else 0;
             defer if (record) self.frame_profile.end(.plan, plan_begin);
             // Launch laps (env-gated, once per process): bracket the

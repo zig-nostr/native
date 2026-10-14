@@ -513,10 +513,12 @@ pub const Runtime = struct {
     /// for platforms without host-side text measurement.
     canvas_font_entries: [canvas_limits.max_registered_canvas_fonts]runtime_canvas_fonts.CanvasFontEntry = [_]runtime_canvas_fonts.CanvasFontEntry{.{}} ** canvas_limits.max_registered_canvas_fonts,
     canvas_font_count: usize = 0,
+    // BEGIN sans-variant-registration patch (zig-nostr/native)
     /// True once a frame has been planned for presentation. The glyph atlas
     /// is retained from then on, so the sans variant ids 3 to 6 may no longer
     /// change face (see `registerCanvasFont`).
     canvas_frame_planned: bool = false,
+    // END sans-variant-registration patch
     canvas_font_faces: [canvas_limits.max_registered_canvas_fonts]canvas.font_ttf.Face = undefined,
     canvas_font_resources_scratch: [canvas_limits.max_registered_canvas_fonts]canvas.ReferenceFont = undefined,
     canvas_font_measure_provider: canvas.TextMeasureProvider = .{ .measure_fn = runtime_canvas_fonts.unboundCanvasFontMeasure },
