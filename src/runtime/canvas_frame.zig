@@ -571,7 +571,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 try canvas.ReferenceRenderSurface.initWithScratch(pixel_size.width, pixel_size.height, pixels, scratch)
             else
                 try canvas.ReferenceRenderSurface.init(pixel_size.width, pixel_size.height, pixels);
-            surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources).withRenderMemo(self.options.pixel_present_render_memo);
+            surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources).withRenderMemo(self.options.pixel_present_render_memo).withSerialMeasure(self.text_cache_policy != null);
             // Frame-profile `present` stage for the CPU pixel path: the
             // reference raster + the host present call (the software
             // equivalent of the packet host's decode+draw).
@@ -1148,7 +1148,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 try canvas.ReferenceRenderSurface.initWithScratch(pixel_size.width, pixel_size.height, pixels, scratch)
             else
                 try canvas.ReferenceRenderSurface.init(pixel_size.width, pixel_size.height, pixels);
-            surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources).withRenderMemo(render_memo);
+            surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources).withRenderMemo(render_memo).withSerialMeasure(self.text_cache_policy != null);
             try surface.renderPass(canvas_frame.renderPass(), self.views[index].canvas_clear_color);
             return .{
                 .width = pixel_size.width,

@@ -129,6 +129,10 @@ pub const ReferenceRenderSurface = struct {
     /// instead of re-running its pixel loop. Same bytes either way —
     /// this only moves time.
     render_memo: ?*ReferenceRenderMemo = null,
+    /// True when a text measure function installed on the runtime can enter
+    /// the compiled TypeScript core, which is entered from one thread. Keeps
+    /// the pass off the worker pool.
+    serial_measure: bool = false,
 
     pub fn init(width: usize, height: usize, pixels: []u8) Error!ReferenceRenderSurface {
         const len = std.math.mul(usize, std.math.mul(usize, width, height) catch return error.ReferenceRenderSurfaceTooSmall, 4) catch return error.ReferenceRenderSurfaceTooSmall;
@@ -164,6 +168,12 @@ pub const ReferenceRenderSurface = struct {
     /// Attach a render memo that outlives this render pass (one per
     /// live scene). Purely an optimization: output bytes are identical
     /// with or without it.
+    pub fn withSerialMeasure(self: ReferenceRenderSurface, serial: bool) ReferenceRenderSurface {
+        var next = self;
+        next.serial_measure = serial;
+        return next;
+    }
+
     pub fn withRenderMemo(self: ReferenceRenderSurface, memo: ?*ReferenceRenderMemo) ReferenceRenderSurface {
         var next = self;
         next.render_memo = memo;
@@ -312,6 +322,10 @@ pub const ReferenceRenderSurface = struct {
     /// buffer, entered from one thread. A pass that carries a policy stays
     /// sequential, whole. Apps with a Zig core leave it null.
     ///
+    /// NO COMPILED TEXT MEASURE. When the runtime carries a compiled core,
+    /// text measurement during a draw can enter it (`serial_measure`), under
+    /// the same one-thread rule. Zig-core apps leave it false and band.
+    ///
     /// AND ENOUGH ROWS TO BE WORTH IT. Bands below a few dozen rows spend more
     /// on the spawn than they save.
     fn referenceBandPlan(self: ReferenceRenderSurface, pass: CanvasRenderPass) ?usize {
@@ -321,7 +335,8 @@ pub const ReferenceRenderSurface = struct {
         for (pass.commands) |command| {
             if (command.command == .blur) return null;
         }
-        const cores = std.Thread.getCpuCount() catch return null;
+        if (self.serial_measure) return null;
+        const cores = cpuCount();
         if (cores < 2) return null;
         const by_rows = self.height / min_reference_band_rows;
         const bands = @min(@min(cores, max_reference_bands), by_rows);
@@ -354,32 +369,120 @@ pub const ReferenceRenderSurface = struct {
         }
     }
 
-    fn renderPassBanded(self: ReferenceRenderSurface, pass: CanvasRenderPass, scale: f32, scissor: ?geometry.RectF, bands: usize) Error!void {
-        var threads: [max_reference_bands]std.Thread = undefined;
+    fn renderPassBanded(self: ReferenceRenderSurface, pass: CanvasRenderPass, scale: f32, scissor: ?geometry.RectF, planned_bands: usize) Error!void {
+        // Every path renders every row exactly once. When the pool cannot be
+        // had (disabled, still busy with another pass, or no worker could be
+        // started) the whole pass runs here, sequentially.
+        const workers = BandPool.acquire() orelse return self.renderSequential(pass, scale, scissor);
+        defer BandPool.release();
+        const bands = @min(planned_bands, workers + 1);
+        if (bands < 2) return self.renderSequential(pass, scale, scissor);
+
         var errors: [max_reference_bands]?Error = @splat(null);
         const rows = self.height / bands;
-        var spawned: usize = 0;
-
-        // The last band runs on THIS thread: one fewer spawn, and the caller
-        // has to wait for all of them anyway.
-        while (spawned + 1 < bands) : (spawned += 1) {
-            const y0 = spawned * rows;
-            threads[spawned] = std.Thread.spawn(.{}, renderBandThread, .{ self, pass, scale, scissor, y0, y0 + rows, &errors[spawned] }) catch break;
-        }
-        renderBandThread(self, pass, scale, scissor, spawned * rows, self.height, &errors[bands - 1]);
-        for (threads[0..spawned]) |thread| thread.join();
-
-        // A band that could not be spawned left its rows undrawn, so the
-        // remainder is rendered here rather than silently lost.
-        if (spawned + 1 < bands) {
-            var missed = spawned;
-            while (missed + 1 < bands) : (missed += 1) {
-                const y0 = missed * rows;
-                renderBandThread(self, pass, scale, scissor, y0, y0 + rows, &errors[missed]);
-            }
-        }
+        BandPool.run(self, pass, scale, scissor, rows, bands, &errors);
+        // The last band runs on THIS thread, and takes any remainder rows.
+        renderBandThread(self, pass, scale, scissor, (bands - 1) * rows, self.height, &errors[bands - 1]);
+        BandPool.finish(bands - 1);
         for (errors[0..bands]) |maybe| if (maybe) |err| return err;
     }
+
+    fn renderSequential(self: ReferenceRenderSurface, pass: CanvasRenderPass, scale: f32, scissor: ?geometry.RectF) Error!void {
+        for (pass.commands) |command| try self.renderCommand(referenceScaleCommand(command, scale), scissor);
+    }
+
+    /// Test hook: false makes `acquire` report no pool, which is the path a
+    /// failed worker spawn takes.
+    pub var band_pool_enabled: bool = true;
+
+    var cached_cpu_count: std.atomic.Value(usize) = .init(0);
+
+    fn cpuCount() usize {
+        const known = cached_cpu_count.load(.monotonic);
+        if (known != 0) return known;
+        const count = std.Thread.getCpuCount() catch 1;
+        cached_cpu_count.store(count, .monotonic);
+        return count;
+    }
+
+    /// A persistent set of worker threads, created once per process on first
+    /// use. Each worker owns its thread-local glyph scratch for its whole
+    /// life, so that scratch is allocated once per worker and reused every
+    /// frame, instead of once per spawned thread per frame.
+    const BandPool = struct {
+        const worker_stack_bytes: usize = 4 * 1024 * 1024;
+        const Job = struct {
+            surface: ReferenceRenderSurface,
+            pass: CanvasRenderPass,
+            scale: f32,
+            scissor: ?geometry.RectF,
+            rows: usize,
+            errors: *[max_reference_bands]?Error,
+        };
+        /// 0 not started, 1 starting, 2 ready, 3 unavailable.
+        var state: std.atomic.Value(u32) = .init(0);
+        var busy: std.atomic.Value(bool) = .init(false);
+        var worker_count: usize = 0;
+        var wake: [max_reference_bands - 1]std.Io.Semaphore = @splat(.{});
+        var done: std.Io.Semaphore = .{};
+        var job: Job = undefined;
+
+        fn io() std.Io {
+            return std.Io.Threaded.global_single_threaded.io();
+        }
+
+        /// The worker count if this thread now owns the pool, else null.
+        fn acquire() ?usize {
+            if (!band_pool_enabled) return null;
+            if (state.load(.acquire) == 3) return null;
+            if (busy.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return null;
+            if (state.load(.acquire) == 0) {
+                state.store(1, .monotonic);
+                start();
+            }
+            if (state.load(.acquire) != 2) {
+                busy.store(false, .release);
+                return null;
+            }
+            return worker_count;
+        }
+
+        fn release() void {
+            busy.store(false, .release);
+        }
+
+        fn start() void {
+            const want = @min(cpuCount(), max_reference_bands) -| 1;
+            var started: usize = 0;
+            while (started < want) : (started += 1) {
+                const thread = std.Thread.spawn(.{ .stack_size = worker_stack_bytes }, workerMain, .{started}) catch break;
+                thread.detach();
+            }
+            worker_count = started;
+            state.store(if (started >= 1) 2 else 3, .release);
+        }
+
+        fn workerMain(index: usize) void {
+            while (true) {
+                wake[index].waitUncancelable(io());
+                const j = job;
+                const y0 = index * j.rows;
+                renderBandThread(j.surface, j.pass, j.scale, j.scissor, y0, y0 + j.rows, &j.errors[index]);
+                done.post(io());
+            }
+        }
+
+        /// Hand bands 0..bands-2 to workers 0..bands-2.
+        fn run(surface: ReferenceRenderSurface, pass: CanvasRenderPass, scale: f32, scissor: ?geometry.RectF, rows: usize, bands: usize, errors: *[max_reference_bands]?Error) void {
+            job = .{ .surface = surface, .pass = pass, .scale = scale, .scissor = scissor, .rows = rows, .errors = errors };
+            for (wake[0 .. bands - 1]) |*sem| sem.post(io());
+        }
+
+        fn finish(count: usize) void {
+            var left = count;
+            while (left > 0) : (left -= 1) done.waitUncancelable(io());
+        }
+    };
 
     /// Fewer rows than this and a band costs more to start than it saves.
     const min_reference_band_rows: usize = 64;

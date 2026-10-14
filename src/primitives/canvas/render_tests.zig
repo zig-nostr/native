@@ -3280,3 +3280,47 @@ test "canvas frame plan reports diff storage overflow" {
         .changes = &changes,
     }));
 }
+
+// BEGIN banded-raster patch (zig-nostr/native)
+fn bandedTestRender(pixels: []u8, serial: bool, pool: bool) !void {
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    var index: usize = 0;
+    while (index < 6) : (index += 1) {
+        const y: f32 = @floatFromInt(index * 37);
+        try builder.fillRoundedRect(.{
+            .id = @intCast(index + 1),
+            .rect = geometry.RectF.init(8, y + 5, 150, 60),
+            .radius = Radius.all(10),
+            .fill = .{ .color = Color.rgb8(@intCast(40 * index), 90, 200) },
+        });
+        try builder.drawText(.{
+            .size = 14,
+            .origin = geometry.PointF.init(14, y + 30),
+            .color = Color.rgb8(255, 255, 255),
+            .text = "Band edge text",
+        });
+    }
+    var render_commands: [16]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    const surface = (try ReferenceRenderSurface.init(170, 256, pixels)).withSerialMeasure(serial);
+    ReferenceRenderSurface.band_pool_enabled = pool;
+    defer ReferenceRenderSurface.band_pool_enabled = true;
+    try surface.renderPass(.{
+        .commands = plan.commands,
+        .surface_size = geometry.SizeF.init(170, 256),
+        .full_repaint = true,
+    }, Color.rgb8(0, 0, 0));
+}
+
+test "a banded pass is byte-identical to the sequential render, with or without the pool" {
+    var sequential: [170 * 256 * 4]u8 = undefined;
+    var banded: [170 * 256 * 4]u8 = undefined;
+    var no_pool: [170 * 256 * 4]u8 = undefined;
+    try bandedTestRender(&sequential, true, true);
+    try bandedTestRender(&banded, false, true);
+    try bandedTestRender(&no_pool, false, false);
+    try std.testing.expectEqualSlices(u8, &sequential, &banded);
+    try std.testing.expectEqualSlices(u8, &sequential, &no_pool);
+}
+// END banded-raster patch
