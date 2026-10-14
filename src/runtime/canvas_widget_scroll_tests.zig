@@ -2340,4 +2340,85 @@ test "a notch arriving mid-travel adds to the target rather than restarting it" 
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectApproxEqAbs(@as(f32, 80), retained.nodes[0].widget.value, 0.01);
 }
+
+test "an armed notch asks for a frame and the frame events then move it" {
+    // The notch arms the ease and moves nothing, so the pointer path has no
+    // dirty rect. It has to request the first frame itself, and the frame
+    // events that follow have to carry the offset the rest of the way.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-wheel-ease-3", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = context;
+            _ = runtime;
+            _ = event_value;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 400, 0, 32), .text = "Far" },
+    };
+    const scroll = canvas.Widget{ .id = 1, .kind = .scroll_view, .children = &children };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", .{ .scroll = .{
+        .wheel_ease_ms = 200,
+        .wheel_velocity_scale = 0,
+        .stop_velocity = 1,
+    } });
+
+    const start_ns: u64 = 1_000_000_000;
+    harness.null_platform.gpu_surface_frame_request_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = start_ns,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 80,
+        .scroll_is_detented = true,
+    } });
+    try std.testing.expect(harness.null_platform.gpu_surface_frame_request_count > 0);
+
+    var frame_index: u64 = 1;
+    var now_ns = start_ns;
+    while (frame_index <= 4) : (frame_index += 1) {
+        now_ns += 50_000_000;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = 1,
+            .label = "canvas",
+            .size = geometry.SizeF.init(180, 72),
+            .scale_factor = 1,
+            .frame_index = frame_index,
+            .timestamp_ns = now_ns,
+            .frame_interval_ns = 16_000_000,
+        } });
+        if (frame_index == 1) {
+            const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expect(retained.nodes[0].widget.value > 0);
+            try std.testing.expect(retained.nodes[0].widget.value < 80);
+        }
+    }
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 80), retained.nodes[0].widget.value, 0.01);
+}
 // END wheel-ease patch

@@ -2571,7 +2571,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return;
 
             const source: runtime_view.CanvasWidgetScrollSource = if (pointer_event.pointer.scroll_is_detented) .detented_wheel else .wheel;
-            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta, source) orelse return;
+            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta, source) orelse {
+                // BEGIN wheel-ease patch (zig-nostr/native)
+                // An armed ease moves nothing on arrival, so there is no dirty
+                // rect, but it still owes frames: nothing else asks for the
+                // first one.
+                if (self.views[index].canvasWidgetScrollEaseActive()) {
+                    try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, index);
+                }
+                // END wheel-ease patch
+                return;
+            };
             const previous_cursor = self.views[index].canvas_widget_cursor;
             try reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, pointer_event.pointer.point);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
