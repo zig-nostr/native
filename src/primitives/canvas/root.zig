@@ -126,6 +126,31 @@ pub const default_mono_font_family = FontFamily.geist_mono;
 /// atlas keys, and fingerprints.
 pub const min_registered_font_id: FontId = 64;
 
+// BEGIN sans-variant-registration patch (zig-nostr/native, see vercel-labs/native#423)
+
+/// True for the reserved ids an app is allowed to fill with its own face.
+///
+/// Ids 1 and 2 have bundled faces and 7..63 are unassigned. The four sans
+/// variants are different: `textSpanFontId` maps a span's weight onto them,
+/// and the toolkit bundles regular, medium and bold Geist for them but no
+/// italic face, and an app that ships its own family needs its own weights
+/// under these ids for the weight mapping to keep working. Registering below
+/// `min_registered_font_id` is refused, and pointing `typography.font_id` at a
+/// registered family instead loses weight mapping entirely, because
+/// `textSpanFontId` then returns that one id for every span.
+///
+/// Opening exactly these four lets an app fill them, and the weight mapping
+/// keeps working because the ids are the ones the mapping already produces.
+/// Nothing else in the reserved range opens.
+pub fn isFillableReservedFontId(id: FontId) bool {
+    return id == default_sans_medium_font_id or
+        id == default_sans_bold_font_id or
+        id == default_sans_italic_font_id or
+        id == default_sans_bold_italic_font_id;
+}
+
+// END sans-variant-registration patch
+
 pub const default_glyph_atlas_cache_retention_frames: u64 = 120;
 pub const default_text_layout_cache_retention_frames: u64 = 120;
 

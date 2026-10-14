@@ -1358,3 +1358,59 @@ test "a fallback glyph is inked inside the cell layout charged for it" {
     // the bound above.
     try std.testing.expect(ink_px > cell_px * 0.5);
 }
+
+// ------------------------------------- the weight receipt (sans-variant patch)
+
+test "an app can fill the reserved sans variant ids, and only those" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    try installFontFixtureWidgets(harness);
+
+    // The four sans variants are the ONLY reserved ids that open. They are
+    // the ids `textSpanFontId` already maps a span's weight onto.
+    for ([_]canvas.FontId{
+        canvas.default_sans_medium_font_id,
+        canvas.default_sans_bold_font_id,
+        canvas.default_sans_italic_font_id,
+        canvas.default_sans_bold_italic_font_id,
+    }) |id| {
+        try std.testing.expect(canvas.isFillableReservedFontId(id));
+    }
+    // Everything else in the range stays shut: the two ids that DO have a
+    // bundled face of their own, and the unassigned tail held for future
+    // built-ins.
+    for ([_]canvas.FontId{
+        canvas.default_sans_font_id,
+        canvas.default_mono_font_id,
+        7,
+        canvas.min_registered_font_id - 1,
+    }) |id| {
+        try std.testing.expect(!canvas.isFillableReservedFontId(id));
+        try std.testing.expectError(error.ReservedFontId, harness.runtime.registerCanvasFont(id, mono_bytes));
+    }
+
+    try std.testing.expect(harness.runtime.registeredCanvasFontFace(canvas.default_sans_medium_font_id) == null);
+
+    const regular_shot = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(regular_shot);
+    // The bundled medium face, before the app supplies its own.
+    const bundled_medium = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_medium_font_id);
+    defer std.testing.allocator.free(bundled_medium);
+
+    try harness.runtime.registerCanvasFont(canvas.default_sans_medium_font_id, mono_bytes);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.registeredCanvasFontCount());
+    try std.testing.expect(harness.runtime.registeredCanvasFontFace(canvas.default_sans_medium_font_id) != null);
+
+    // The registered face wins over the bundled one for its own id.
+    const filled_medium = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_medium_font_id);
+    defer std.testing.allocator.free(filled_medium);
+    try std.testing.expect(!std.mem.eql(u8, filled_medium, bundled_medium));
+
+    // And filling a variant does not disturb the regular face beside it, which
+    // is what makes this safe to do on one weight at a time.
+    const regular_after = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(regular_after);
+    try std.testing.expect(std.mem.eql(u8, regular_after, regular_shot));
+}

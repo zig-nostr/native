@@ -118,7 +118,9 @@ pub fn unboundCanvasFontMeasure(context: ?*anyopaque, font_id: canvas.FontId, si
 pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
     return struct {
         /// Register the TrueType face in `ttf` under `id` (an app-chosen
-        /// id at or above `canvas.min_registered_font_id`). The runtime
+        /// id at or above `canvas.min_registered_font_id`, or one of the
+        /// four reserved sans variant ids, see
+        /// `canvas.isFillableReservedFontId`). The runtime
         /// copies the bytes, so the caller's buffer is free when this
         /// returns; the id resolves everywhere a `FontId` rides, for the
         /// rest of the runtime's lifetime. Startup-shaped: register before
@@ -128,7 +130,8 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// Errors — all at registration, never at render time:
         /// `error.InvalidFontId` (id 0 is the "inherit run font"
         /// sentinel), `error.ReservedFontId` (below
-        /// `canvas.min_registered_font_id` — reserved for built-in
+        /// `canvas.min_registered_font_id` and not one of the four sans
+        /// variant ids, the rest of that range is reserved for built-in
         /// faces), `error.FontTooLarge` (over the per-font bound
         /// `canvas_limits.max_registered_canvas_font_bytes`),
         /// `error.FontIdInUse` (ids are permanent; see the module doc),
@@ -147,13 +150,23 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
             var bind_provider = false;
             const index = if (self.font_registry_policy) |policy| compiled: {
                 var scratch: [8]u64 = undefined;
-                const program = registry_policy.plan(policy, .register, registry_policy.registryIds(self, &scratch), self.canvas_font_count, .{ .id = id, .minimum_id = canvas.min_registered_font_id, .length = ttf.len, .budget = max_registered_canvas_font_bytes });
+                // BEGIN sans-variant-registration patch (zig-nostr/native)
+                // The compiled policy owns the floor check and takes the floor
+                // as an input. For the four fillable sans variant ids the
+                // floor for THIS request is 0, so the policy's own admission
+                // order (id 0, floor, size, duplicate, capacity) runs
+                // unchanged and no TypeScript has to move.
+                const floor: u64 = if (canvas.isFillableReservedFontId(id)) 0 else canvas.min_registered_font_id;
+                // END sans-variant-registration patch
+                const program = registry_policy.plan(policy, .register, registry_policy.registryIds(self, &scratch), self.canvas_font_count, .{ .id = id, .minimum_id = floor, .length = ttf.len, .budget = max_registered_canvas_font_bytes });
                 try program.admit();
                 bind_provider = program.action & 2 != 0;
                 break :compiled program.selected.?;
             } else native: {
                 if (id == 0) return error.InvalidFontId;
-                if (id < canvas.min_registered_font_id) return error.ReservedFontId;
+                // BEGIN sans-variant-registration patch (zig-nostr/native)
+                if (id < canvas.min_registered_font_id and !canvas.isFillableReservedFontId(id)) return error.ReservedFontId;
+                // END sans-variant-registration patch
                 if (ttf.len > max_registered_canvas_font_bytes) return error.FontTooLarge;
                 if (findCanvasFontIndex(self, id) != null) return error.FontIdInUse;
                 if (self.canvas_font_count >= max_registered_canvas_fonts) return error.FontRegistryFull;

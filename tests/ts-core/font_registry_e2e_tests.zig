@@ -96,6 +96,19 @@ test "compiled font registry preserves complete admission, permanent identity, c
     }
     try pair.same();
 }
+// BEGIN sans-variant-registration patch (zig-nostr/native)
+test "compiled font registry admits the four sans variant ids exactly as the native path does" {
+    const pair = try Pair.create();
+    defer pair.destroy();
+    for ([_]*Harness{ pair.left, pair.right }) |h| {
+        for ([_]u64{ 1, 2, 7, 63 }) |id| try std.testing.expectError(error.ReservedFontId, h.runtime.registerCanvasFont(id, font));
+        for ([_]u64{ 3, 4, 5, 6 }) |id| try h.runtime.registerCanvasFont(id, font);
+        for ([_]u64{ 3, 4, 5, 6 }) |id| try std.testing.expectError(error.FontIdInUse, h.runtime.registerCanvasFont(id, font));
+        try std.testing.expectEqual(@as(usize, 4), h.runtime.canvas_font_count);
+    }
+    try pair.same();
+}
+// END sans-variant-registration patch
 test "compiled font registry preserves allocation refusal, parse refusal, retry and frozen allocator identity" {
     const pair = try Pair.create();
     var counters = [_]std.testing.FailingAllocator{
