@@ -1004,7 +1004,7 @@ pub const ScrollAxisState = struct {
     fn easeDurationMs(current: ScrollEaseAxis, physics: ScrollPhysics, now_ns: u64) u32 {
         if (!current.active() or now_ns <= current.start_ns) return physics.wheel_ease_ms;
         const gap_ms = (now_ns - current.start_ns) / std.time.ns_per_ms;
-        const doubled = std.math.clamp(gap_ms * 2, 50, physics.wheel_ease_ms);
+        const doubled = std.math.clamp(gap_ms * 2, @min(50, physics.wheel_ease_ms), physics.wheel_ease_ms);
         return @intCast(doubled);
     }
 
