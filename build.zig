@@ -2027,6 +2027,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "view->gpu_scroll_source = g_timeout_add_full(G_PRIORITY_DEFAULT," },
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "static gboolean native_sdk_gpu_scroll_flush" },
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "native_sdk_gpu_scroll_advance_pacing_clock(view);" },
+        // The flush carries the detented kind only when every event folded
+        // into it was a detented one (see PATCHES.md, patch 5).
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "view->gpu_scroll_all_detented ? NATIVE_SDK_GTK_GPU_INPUT_DETENTED_SCROLL : NATIVE_SDK_GTK_GPU_INPUT_SCROLL" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "(view->gpu_scroll_all_detented && detented)" },
     });
     // END scroll-coalesce patch
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-audio-buffering-clears-on-noop-resume", "Verify the Linux audio buffering flag drops when the 100% resume completes synchronously", &.{
