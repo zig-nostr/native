@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -329,6 +330,9 @@ pub const ReferenceRenderSurface = struct {
     /// AND ENOUGH ROWS TO BE WORTH IT. Bands below a few dozen rows spend more
     /// on the spawn than they save.
     fn referenceBandPlan(self: ReferenceRenderSurface, pass: CanvasRenderPass) ?usize {
+        // A single-threaded target (the wasm docs preview) cannot spawn, so it
+        // never bands and the pool is never analysed for it.
+        if (comptime builtin.single_threaded) return null;
         if (self.render_memo != null) return null;
         if (self.vector_policy != null) return null;
         if (self.height < min_reference_band_rows * 2) return null;
@@ -370,6 +374,7 @@ pub const ReferenceRenderSurface = struct {
     }
 
     fn renderPassBanded(self: ReferenceRenderSurface, pass: CanvasRenderPass, scale: f32, scissor: ?geometry.RectF, planned_bands: usize) Error!void {
+        if (comptime builtin.single_threaded) return self.renderSequential(pass, scale, scissor);
         // Every path renders every row exactly once. When the pool cannot be
         // had (disabled, still busy with another pass, or no worker could be
         // started) the whole pass runs here, sequentially.
