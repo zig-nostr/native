@@ -25,7 +25,7 @@ when the next release contains it.
 | 3 | Any registered face may lend a glyph | [#421](https://github.com/vercel-labs/native/issues/421) (its own suggestion 2, [reported here](https://github.com/vercel-labs/native/issues/421#issuecomment-5576005547)) | carried | `reference.zig`, `canvas_font_tests.zig` | restoring the `hasColorGlyphs` gate in `referenceGlyphFor` and reverting the Chinese receipt's last assertion |
 | 4 | The Linux present path honours the dirty rect | [#432](https://github.com/vercel-labs/native/issues/432) | dropped, fixed upstream by [#434](https://github.com/vercel-labs/native/pull/434) | none | already gone |
 | 5 | Scroll input is coalesced to one event a frame | [#440](https://github.com/vercel-labs/native/issues/440) | carried, rebased onto #434 and #470 | `platform/linux/gtk_host.c`, `build.zig` | deleting everything between the `scroll-coalesce patch` markers |
-| 6 | A detented wheel notch travels instead of teleporting | [#441](https://github.com/vercel-labs/native/issues/441) | carried, narrower: upstream [#470](https://github.com/vercel-labs/native/pull/470) supplies the detented flag and the no-fling rule, the travel is ours | `canvas/tokens.zig`, `canvas/root.zig`, `runtime/view_widget_scroll.zig`, `runtime/view.zig`, `runtime/canvas_widget_{runtime,display,state}.zig`, `runtime/view_widget_tree.zig`, `runtime/core.zig`, `runtime/gpu_surface_events.zig`, `runtime/canvas_widget_scroll_tests.zig` | deleting everything between the `wheel-ease patch` markers |
+| 6 | A detented wheel notch travels instead of teleporting | [#441](https://github.com/vercel-labs/native/issues/441) | carried, narrower: upstream [#470](https://github.com/vercel-labs/native/pull/470) supplies the detented flag and the no-fling rule, the travel is ours | `canvas/tokens.zig`, `canvas/root.zig`, `runtime/view_widget_scroll.zig`, `runtime/view.zig`, `runtime/canvas_widget_{runtime,display,state}.zig`, `runtime/view_widget_tree.zig`, `runtime/core.zig`, `runtime/gpu_surface_events.zig`, `runtime/canvas_widget_events.zig`, `runtime/canvas_widget_scroll_tests.zig`, `canvas/widget_layout_tests.zig` | deleting everything between the `wheel-ease patch` markers, then restoring the unmarked in-place edits listed in the patch 6 section |
 | 7 | Fills stop doing per-pixel work that is loop-invariant or absent | [#442](https://github.com/vercel-labs/native/issues/442) | carried | `canvas/reference.zig` | deleting everything between the `opaque-coverage patch` markers |
 | 8 | The rasteriser uses the cores it has | [#443](https://github.com/vercel-labs/native/issues/443) | carried, reapplied onto the new `renderPass`, on a persistent worker pool, and skipped for a pass that carries a compiled vector policy or a compiled text measure | `canvas/reference.zig`, `canvas/render_tests.zig`, `runtime/canvas_frame.zig` | deleting everything between the `banded-raster patch` markers, and the two `withSerialMeasure` calls in `runtime/canvas_frame.zig` (unmarked) |
 
@@ -204,7 +204,7 @@ and an app that tunes `wheel_velocity_scale` should re-check it.
 
 ## Patch 6: a detented wheel notch travels instead of teleporting
 
-Marked with `// BEGIN wheel-ease patch` across the runtime and canvas files.
+Marked with `// BEGIN wheel-ease patch` / `// END wheel-ease patch` across the runtime and canvas files. A few in-place edits to upstream lines cannot carry markers; they are listed at the end of this section.
 Upstream [#441](https://github.com/vercel-labs/native/issues/441).
 
 `applyWheel` does `next.offset += delta`, which is right for a touchpad and
@@ -227,19 +227,56 @@ the rule that a detented notch carries no fling velocity. This patch used its
 own `wheel_detented` flag and source beside it before; those are gone, and the
 travel is built on upstream's names and plumbing. What remains is only the
 travel: `wheel_ease_ms`, the ease state, the frame step, and the outcome type.
-`wheel_ease_ms` defaults to zero, which is #470's behaviour exactly.
+`wheel_ease_ms` defaults to zero. At zero no ease is ever armed, so every path
+that this patch touches reduces to what v0.11.0 does: the new state is never
+written and never read for a decision.
 
-Two of the pieces are behaviour changes to shared paths rather than additions:
-the scroll axis returns `{consumed, dirty}` instead of `?RectF`, and
-`advanceCanvasWidgetKineticScrollForFrame` no longer skips the whole step when
-input is pending.
+Two of the pieces change shared code rather than adding to it. The scroll axis
+returns `{consumed, dirty}` instead of `?RectF`, which is plumbing: the same
+inputs produce the same offsets and the same dirty rects. And
+`advanceCanvasWidgetKineticScrollForFrame` takes the frame's timestamp. With no
+ease armed it is upstream's function again: a frame that carries pending input
+requests the next frame and steps nothing, any other frame steps momentum. With
+an ease armed, a pending-input frame steps the ease axes only
+(`stepCanvasWidgetScrollEasesAt`) and still leaves momentum alone.
 
-**Tests.** Two in `canvas_widget_scroll_tests.zig`, and they are the only
-executable thing that reaches the travel. `native automate wheel` dispatches a
+An armed ease is retired whenever the offset is written another way: a
+continuous wheel, Home and End, a reveal, and a region whose viewport collapses or that
+becomes model-driven virtual or native-driven. `canvasWidgetKineticScrollActive`
+takes a mutable view for the last of those.
+
+**Tests.** Six in `canvas_widget_scroll_tests.zig` and one in
+`canvas/widget_layout_tests.zig`. `native automate wheel` dispatches a
 `.gpu_surface_input` directly and never enters the GTK handler, so the rest of
-the battery passes whether this is right or wrong. They set `scroll_is_detented`
-themselves and drive the frame clock by hand. Upstream's own test in the same
-file covers the instant path with `wheel_ease_ms` at zero.
+the battery passes whether this is right or wrong. They set
+`scroll_is_detented` themselves and drive the frame clock by hand. They cover
+the travel and its landing, composition of a second notch with exact mid-travel
+offsets, the first frame being requested from the pointer path and the frame
+events then moving the offset, Home and End retiring an armed ease, a collapsed
+viewport retiring it, the ease-only step leaving momentum alone, and a token
+under 50ms not tripping the duration clamp. Upstream's own test in the same file
+covers the instant path with `wheel_ease_ms` at zero.
+
+**Edits that cannot carry markers.** These change an upstream line in place, so
+deleting the marked blocks does not restore them. To remove the patch, put the
+v0.11.0 text back at each site:
+
+- `view_widget_scroll.zig`: `canvasWidgetKineticScrollActive` takes
+  `*RuntimeView` instead of `*const RuntimeView`.
+- `view_widget_scroll.zig`: `applyCanvasWidgetScrollAxis` returns
+  `CanvasWidgetScrollOutcome` instead of `?RectF`, so its early `return null`
+  lines, the textarea return, the `next.offset == current.offset` return and the
+  final dirty-bounds return are now `.ignored` or `.moved(...)`.
+- `view_widget_scroll.zig`: in the kinetic step, `if (current_y.needsKineticStep`
+  and its x twin are now `} else if`, and the closing `} else {` that zeroes the
+  off-axis velocity is `} else if (!ease_only) {`. The step itself is split into
+  a public wrapper and `stepCanvasWidgetScrollImpl`.
+- `canvas_widget_display.zig`: `advanceCanvasWidgetKineticScrollForFrame` has an
+  extra `now_ns` parameter and calls `stepCanvasWidgetKineticScrollAt` instead
+  of `stepCanvasWidgetKineticScroll`.
+- `canvas_widget_state.zig`: the step is split into a wrapper and
+  `stepCanvasWidgetScrollImpl`, and its view call became a conditional between
+  the two view steps.
 
 ## Patch 7: fills stop doing per-pixel work that is loop-invariant or absent
 

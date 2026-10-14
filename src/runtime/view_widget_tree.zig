@@ -230,7 +230,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             const previous_scroll_states = collectCanvasWidgetScrollReconcileEntries(
                 self.widgetLayoutTree().nodes,
                 self.widget_scroll_states[0..self.widget_layout_node_count],
+                // BEGIN wheel-ease patch (zig-nostr/native)
                 self.widget_scroll_eases[0..self.widget_layout_node_count],
+                // END wheel-ease patch
                 &scratch.scroll_entries,
             );
             var previous_text_len: usize = 0;
@@ -320,7 +322,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 const copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, layout, layout_index, &index_scratch.controls, &index_scratch.source_controls);
                 self.widget_layout_nodes[self.widget_layout_node_count] = copy;
                 self.widget_scroll_states[self.widget_layout_node_count] = canvasWidgetScrollStateForLayoutNode(copy, previous_scroll_states);
+                // BEGIN wheel-ease patch (zig-nostr/native)
                 self.widget_scroll_eases[self.widget_layout_node_count] = canvas_widget_runtime.canvasWidgetScrollEaseForLayoutNode(copy, previous_scroll_states);
+                // END wheel-ease patch
                 self.widget_layout_node_count += 1;
             }
 

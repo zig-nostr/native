@@ -1325,7 +1325,9 @@ pub const RuntimeView = struct {
         self.copyWidgetLayoutTree(source.widgetLayoutTree(), scratch) catch unreachable;
         self.widget_revision = source.widget_revision;
         @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
+        // BEGIN wheel-ease patch (zig-nostr/native)
         @memcpy(self.widget_scroll_eases[0..source.widget_layout_node_count], source.widget_scroll_eases[0..source.widget_layout_node_count]);
+        // END wheel-ease patch
     }
 
     pub fn ensureLargeCanvasWidgetTextStorage(self: *RuntimeView, allocator: std.mem.Allocator) !void {

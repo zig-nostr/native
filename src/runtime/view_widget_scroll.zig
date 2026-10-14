@@ -124,8 +124,10 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     depth_limit = self.widget_layout_nodes[scroll_index].depth;
                     continue;
                 }
+                // BEGIN wheel-ease patch (zig-nostr/native)
                 const outcome = try self.applyCanvasWidgetScrollAxis(scroll_index, axis, delta, source, !has_scroll_parent);
                 if (outcome.consumed) return outcome.dirty;
+                // END wheel-ease patch
                 depth_limit = self.widget_layout_nodes[scroll_index].depth;
             }
             return null;
@@ -243,15 +245,19 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 break :blk if (ease_axis.active()) ease_axis.target else current.offset;
             };
             // END wheel-ease patch
+            // BEGIN wheel-ease patch (zig-nostr/native)
             if (reference < 0) return delta > 0;
             if (reference > max_offset) return delta < 0;
             return if (delta > 0) reference < max_offset else reference > 0;
+            // END wheel-ease patch
         }
 
         pub fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta: geometry.OffsetF, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
             const vertical = try self.applyCanvasWidgetScrollAxis(scroll_index, .vertical, delta.dy, source, allow_rubberband);
             const horizontal = try self.applyCanvasWidgetScrollAxis(scroll_index, .horizontal, delta.dx, source, allow_rubberband);
+            // BEGIN wheel-ease patch (zig-nostr/native)
             return unionOptionalRects(vertical.dirty, horizontal.dirty);
+            // END wheel-ease patch
         }
 
         // BEGIN wheel-ease patch (zig-nostr/native)
@@ -561,14 +567,18 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                             const target = self.widget_layout_nodes[target_index].frame.normalized();
                             const delta_y = canvasWidgetRevealAxisRequestedDelta(.vertical, target, viewport);
                             if (delta_y != 0) {
+                                // BEGIN wheel-ease patch (zig-nostr/native)
                                 dirty = unionOptionalRects(dirty, (try self.applyCanvasWidgetScrollAxis(ancestor_index, .vertical, delta_y, .discrete, false)).dirty);
+                                // END wheel-ease patch
                             }
                         }
                         if (canvas.widgetScrollsAxis(ancestor.widget, .horizontal)) {
                             const target = self.widget_layout_nodes[target_index].frame.normalized();
                             const delta_x = canvasWidgetRevealAxisRequestedDelta(.horizontal, target, viewport);
                             if (delta_x != 0) {
+                                // BEGIN wheel-ease patch (zig-nostr/native)
                                 dirty = unionOptionalRects(dirty, (try self.applyCanvasWidgetScrollAxis(ancestor_index, .horizontal, delta_x, .discrete, false)).dirty);
+                                // END wheel-ease patch
                             }
                         }
                     }
@@ -718,6 +728,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                         }
                     } else if (ease_only) {
                         // Momentum is not this call's to touch.
+                        // END wheel-ease patch
                     } else if (current_y.needsKineticStep(physics)) {
                         const next_y = current_y.stepKinetic(dt_ms, physics);
                         next = next.withAxis(.vertical, next_y);
@@ -741,6 +752,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                         }
                     } else if (ease_only) {
                         // Momentum is not this call's to touch.
+                        // END wheel-ease patch
                     } else if (current_x.needsKineticStep(physics)) {
                         const next_x = current_x.stepKinetic(dt_ms, physics);
                         next = next.withAxis(.horizontal, next_x);

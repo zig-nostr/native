@@ -187,7 +187,9 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 self.views[view_index].window_id,
                 self.views[view_index].label,
                 canvasWidgetKineticScrollFrameMs(frame_interval_ns),
+                // BEGIN wheel-ease patch (zig-nostr/native)
                 now_ns,
+                // END wheel-ease patch
             );
 
             // BEGIN wheel-ease patch (zig-nostr/native)

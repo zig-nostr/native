@@ -686,7 +686,9 @@ pub fn collectCanvasWidgetControlReconcileEntries(
 pub fn collectCanvasWidgetScrollReconcileEntries(
     nodes: []const canvas.WidgetLayoutNode,
     states: []const canvas.ScrollState,
+    // BEGIN wheel-ease patch (zig-nostr/native)
     eases: []const canvas.ScrollEase,
+    // END wheel-ease patch
     output: []CanvasWidgetScrollReconcileEntry,
 ) []const CanvasWidgetScrollReconcileEntry {
     var len: usize = 0;
@@ -694,11 +696,13 @@ pub fn collectCanvasWidgetScrollReconcileEntries(
     for (nodes[0..count], 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
         if (len >= output.len) break;
+        // BEGIN wheel-ease patch (zig-nostr/native)
         output[len] = .{
             .id = node.widget.id,
             .state = states[index],
             .ease = if (index < eases.len) eases[index] else .{},
         };
+        // END wheel-ease patch
         len += 1;
     }
     return output[0..len];
