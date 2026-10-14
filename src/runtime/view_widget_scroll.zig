@@ -646,12 +646,24 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         pub fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
             // BEGIN wheel-ease patch (zig-nostr/native)
             // now_ns == 0 means "no clock supplied": sample no ease and leave
-            // every armed one exactly as it is. That is what keeps the eight
-            // existing call sites, all tests, byte-identical.
+            // every armed one exactly as it is, so the existing call sites
+            // and tests keep their behaviour.
             return self.stepCanvasWidgetKineticScrollAt(dt_ms, 0);
         }
 
         pub fn stepCanvasWidgetKineticScrollAt(self: *RuntimeView, dt_ms: f32, now_ns: u64) anyerror!?geometry.RectF {
+            return stepCanvasWidgetScrollImpl(self, dt_ms, now_ns, false);
+        }
+
+        /// Advances only the axes that have an armed ease. Momentum and
+        /// rubber-band recovery are left exactly as they were, which is what a
+        /// frame that carries pending input needs: it must not run the decay,
+        /// but an eased notch still has to be drawn.
+        pub fn stepCanvasWidgetScrollEasesAt(self: *RuntimeView, now_ns: u64) anyerror!?geometry.RectF {
+            return stepCanvasWidgetScrollImpl(self, 0, now_ns, true);
+        }
+
+        fn stepCanvasWidgetScrollImpl(self: *RuntimeView, dt_ms: f32, now_ns: u64, ease_only: bool) anyerror!?geometry.RectF {
             // END wheel-ease patch
             var dirty: ?geometry.RectF = null;
             var changed = false;
@@ -663,6 +675,9 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
                 const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) {
+                    // BEGIN wheel-ease patch (zig-nostr/native)
+                    if (ease_only) continue;
+                    // END wheel-ease patch
                     self.widget_scroll_states[scroll_index].velocity_y = 0;
                     self.widget_scroll_states[scroll_index].velocity_x = 0;
                     continue;
@@ -689,6 +704,8 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                         if (ease.y.finishedAt(now_ns)) {
                             self.widget_scroll_eases[scroll_index].y = .{};
                         }
+                    } else if (ease_only) {
+                        // Momentum is not this call's to touch.
                     } else if (current_y.needsKineticStep(physics)) {
                         const next_y = current_y.stepKinetic(dt_ms, physics);
                         next = next.withAxis(.vertical, next_y);
@@ -696,7 +713,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     } else {
                         next.velocity_y = 0;
                     }
-                } else {
+                } else if (!ease_only) {
                     next.velocity_y = 0;
                 }
 
@@ -710,6 +727,8 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                         if (ease.x.finishedAt(now_ns)) {
                             self.widget_scroll_eases[scroll_index].x = .{};
                         }
+                    } else if (ease_only) {
+                        // Momentum is not this call's to touch.
                     } else if (current_x.needsKineticStep(physics)) {
                         const next_x = current_x.stepKinetic(dt_ms, physics);
                         next = next.withAxis(.horizontal, next_x);
@@ -717,7 +736,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     } else {
                         next.velocity_x = 0;
                     }
-                } else {
+                } else if (!ease_only) {
                     next.velocity_x = 0;
                 }
 

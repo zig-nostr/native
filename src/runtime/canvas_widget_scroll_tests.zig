@@ -2484,4 +2484,57 @@ test "Home and End discard an armed ease instead of being dragged back by it" {
     _ = try harness.runtime.stepCanvasWidgetKineticScrollAt(1, "canvas", 16, start_ns + 100_000_000);
     try std.testing.expectEqual(bottom, (try harness.runtime.canvasWidgetLayout(1, "canvas")).nodes[0].widget.value);
 }
+
+test "stepping only the ease axes leaves momentum alone" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-wheel-ease-6", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = context;
+            _ = runtime;
+            _ = event_value;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 400, 0, 32), .text = "Far" },
+    };
+    const scroll = canvas.Widget{ .id = 1, .kind = .scroll_view, .children = &children };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    _ = try harness.runtime.setCanvasWidgetDesignTokens(1, "canvas", .{ .scroll = .{
+        .wheel_ease_ms = 200,
+        .wheel_velocity_scale = 0,
+        .stop_velocity = 1,
+    } });
+
+    // A fling with no ease armed: the ease-only step must not decay it,
+    // which is what lets a pending-input frame skip the momentum step.
+    harness.runtime.views[0].widget_scroll_states[0].velocity_y = 500;
+    _ = try harness.runtime.stepCanvasWidgetScrollEasesAt(1, "canvas", 1_000_000_000);
+    try std.testing.expectEqual(@as(f32, 500), harness.runtime.views[0].widget_scroll_states[0].velocity_y);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].offset_y);
+
+    // The ordinary step does move it.
+    _ = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].offset_y > 0);
+}
 // END wheel-ease patch

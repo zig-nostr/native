@@ -895,6 +895,7 @@ pub const RuntimeView = struct {
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     // BEGIN wheel-ease patch (zig-nostr/native)
     pub const stepCanvasWidgetKineticScrollAt = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScrollAt;
+    pub const stepCanvasWidgetScrollEasesAt = CanvasWidgetScrollMethods.stepCanvasWidgetScrollEasesAt;
     pub const canvasWidgetScrollEaseActive = CanvasWidgetScrollMethods.canvasWidgetScrollEaseActive;
     // END wheel-ease patch
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;

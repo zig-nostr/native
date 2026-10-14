@@ -1042,6 +1042,7 @@ pub const Runtime = struct {
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetStateMethods.stepCanvasWidgetKineticScroll;
     // BEGIN wheel-ease patch (zig-nostr/native)
     pub const stepCanvasWidgetKineticScrollAt = CanvasWidgetStateMethods.stepCanvasWidgetKineticScrollAt;
+    pub const stepCanvasWidgetScrollEasesAt = CanvasWidgetStateMethods.stepCanvasWidgetScrollEasesAt;
     // END wheel-ease patch
     pub const startCanvasWidgetLayoutTween = CanvasWidgetStateMethods.startCanvasWidgetLayoutTween;
     pub const advanceCanvasWidgetLayoutTweensForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetLayoutTweensForFrame;

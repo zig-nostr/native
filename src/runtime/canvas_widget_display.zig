@@ -156,39 +156,46 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             try settleDeferredCanvasWidgetAccessibility(self);
         }
 
-        pub fn advanceCanvasWidgetKineticScrollForFrame(self: *Runtime, view_index: usize, frame_interval_ns: u64, skip_velocity: bool, now_ns: u64) anyerror!void {
+        pub fn advanceCanvasWidgetKineticScrollForFrame(self: *Runtime, view_index: usize, frame_interval_ns: u64, skip_step: bool, now_ns: u64) anyerror!void {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;
             if (!self.views[view_index].canvasWidgetKineticScrollActive()) return;
 
             // BEGIN wheel-ease patch (zig-nostr/native)
-            // This used to return here without stepping at all when input was
-            // pending, which was right while a wheel event moved the offset
-            // itself: the frame already had the new position. An eased notch
-            // moves nothing when it arrives, so skipping would leave every
-            // input-carrying frame drawing the position before it, which is
-            // the stutter this patch exists to remove.
+            // With no ease armed this is the upstream function: a frame that
+            // carries pending input requests the next one and steps nothing,
+            // any other frame steps momentum.
             //
-            // So the step always runs and `skip_velocity` only silences the
-            // DECAY, which a zero dt does by construction: `stepKinetic`
-            // multiplies velocity by `deceleration^0` (one) and advances the
-            // offset by `velocity * 0`. No new parameter, and the momentum
-            // behaviour is bit-identical to returning early.
+            // An eased notch moves nothing when it arrives, so a pending-input
+            // frame that skipped it would draw the position before it. That
+            // frame steps the ease axes only: the decay stays silent, as it
+            // is upstream.
+            if (skip_step) {
+                if (self.views[view_index].canvasWidgetScrollEaseActive()) {
+                    _ = try self.stepCanvasWidgetScrollEasesAt(
+                        self.views[view_index].window_id,
+                        self.views[view_index].label,
+                        now_ns,
+                    );
+                }
+                try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, view_index);
+                return;
+            }
+            // END wheel-ease patch
+
             _ = try self.stepCanvasWidgetKineticScrollAt(
                 self.views[view_index].window_id,
                 self.views[view_index].label,
-                if (skip_velocity) 0 else canvasWidgetKineticScrollFrameMs(frame_interval_ns),
+                canvasWidgetKineticScrollFrameMs(frame_interval_ns),
                 now_ns,
             );
 
-            // And keep the frames coming while a notch is still travelling.
-            // An ease draws across several frames and nothing else will ask
-            // for them: the notch that armed it moved no pixels. A fling is
-            // NOT included; it already gets its frames the way it always did,
-            // and asking on its behalf would request two where one is due.
-            // `skip_velocity` keeps the request the early return used to
-            // make: a frame with pending input still owes the next one.
-            if (skip_velocity or self.views[view_index].canvasWidgetScrollEaseActive()) {
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            // Keep the frames coming while a notch is still travelling. An
+            // ease draws across several frames and nothing else will ask for
+            // them. A fling is not included: it already gets its frames the
+            // way it always did.
+            if (self.views[view_index].canvasWidgetScrollEaseActive()) {
                 try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, view_index);
             }
             // END wheel-ease patch

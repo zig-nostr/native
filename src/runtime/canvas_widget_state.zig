@@ -377,13 +377,24 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         }
 
         pub fn stepCanvasWidgetKineticScrollAt(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32, now_ns: u64) anyerror!platform.ViewInfo {
+            return stepCanvasWidgetScrollImpl(self, window_id, label, dt_ms, now_ns, false);
+        }
+
+        /// The ease axes only: no decay, no rubber-band recovery.
+        pub fn stepCanvasWidgetScrollEasesAt(self: *Runtime, window_id: platform.WindowId, label: []const u8, now_ns: u64) anyerror!platform.ViewInfo {
+            return stepCanvasWidgetScrollImpl(self, window_id, label, 0, now_ns, true);
+        }
+
+        fn stepCanvasWidgetScrollImpl(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32, now_ns: u64, ease_only: bool) anyerror!platform.ViewInfo {
             // END wheel-ease patch
             try validateRuntimeViewParent(self, window_id);
             try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
-            const dirty = try self.views[index].stepCanvasWidgetKineticScrollAt(dt_ms, now_ns) orelse return self.views[index].info();
+            // BEGIN wheel-ease patch (zig-nostr/native)
+            const dirty = (if (ease_only) try self.views[index].stepCanvasWidgetScrollEasesAt(now_ns) else try self.views[index].stepCanvasWidgetKineticScrollAt(dt_ms, now_ns)) orelse return self.views[index].info();
+            // END wheel-ease patch
             const previous_cursor = self.views[index].canvas_widget_cursor;
             try CanvasWidgetEventMethods(Runtime).reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, null);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try CanvasWidgetEventMethods(Runtime).syncCanvasWidgetCursorForView(self, index);
