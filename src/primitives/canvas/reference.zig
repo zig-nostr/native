@@ -1174,7 +1174,7 @@ pub const ReferenceRenderSurface = struct {
                 .opacity = command.opacity,
                 .coverage_blend = .srgb,
             };
-            vector.fillGlyphPath(
+            vector.fillGlyphPathWithPolicy(
                 &reference_glyph_raster_scratch.get().raster,
                 builder.slice(),
                 Affine.identity(),
@@ -1182,6 +1182,7 @@ pub const ReferenceRenderSurface = struct {
                 vector.default_tolerance,
                 referenceVectorClip(pixel_rect),
                 &sink,
+                self.vector_policy,
             ) catch continue;
             drew = true;
         }
