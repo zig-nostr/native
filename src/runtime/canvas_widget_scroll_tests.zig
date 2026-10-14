@@ -2327,12 +2327,17 @@ test "a notch arriving mid-travel adds to the target rather than restarting it" 
         .scroll_is_detented = true,
     };
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = notch });
+    // Without the ease the first notch would already sit at 40 here.
+    try std.testing.expectEqual(@as(f32, 0), (try harness.runtime.canvasWidgetLayout(1, "canvas")).nodes[0].widget.value);
     _ = try harness.runtime.stepCanvasWidgetKineticScrollAt(1, "canvas", 16, start_ns + 100_000_000);
+    try std.testing.expectApproxEqAbs(@as(f32, 30), (try harness.runtime.canvasWidgetLayout(1, "canvas")).nodes[0].widget.value, 0.01);
 
-    // A second notch lands while the first is still travelling.
+    // A second notch lands while the first is still travelling. It retargets
+    // from where the content is (30) to 80 and moves nothing on arrival.
     var second = notch;
     second.timestamp_ns = start_ns + 100_000_000;
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = second });
+    try std.testing.expectApproxEqAbs(@as(f32, 30), (try harness.runtime.canvasWidgetLayout(1, "canvas")).nodes[0].widget.value, 0.01);
 
     // Long past both durations, the feed has travelled the full 80: nothing
     // was dropped and nothing was double counted.
