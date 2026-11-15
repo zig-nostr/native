@@ -155,6 +155,10 @@ pub const max_effect_pending_images_inline: usize = max_effect_pending_exits;
 pub const max_effect_url_bytes: usize = 2048;
 /// Maximum extra headers per fetch.
 pub const max_effect_fetch_headers: usize = 8;
+/// Storage for a fetch's `user-agent` override.
+pub const max_effect_fetch_ua_bytes: usize = 256;
+/// How many redirects a fetch followed before this option existed.
+pub const default_effect_fetch_max_redirects: u16 = 3;
 /// Maximum total bytes across all header names and values of one fetch.
 pub const max_effect_fetch_header_bytes: usize = 1024;
 /// Maximum request payload per fetch (the body sent to the server).
@@ -3058,6 +3062,22 @@ pub fn Effects(comptime Msg: type) type {
             /// same rejection of over-ceiling or zero requests).
             /// Ignored by `.buffered` fetches.
             max_line_bytes: usize = max_effect_line_bytes,
+            /// How many HTTP 3xx redirects the client may follow on
+            /// its own. The default keeps the historical behavior; 0
+            /// hands every redirect back as the terminal response, and
+            /// the app decides. A fetch of a stranger-supplied URL
+            /// (a picture, a link preview, an update feed) should not
+            /// follow blindly: each hop lands wherever the redirect
+            /// names, and a public URL can point this machine at its
+            /// own loopback or LAN — the app's URL checks never see
+            /// the hops.
+            max_redirects: u16 = default_effect_fetch_max_redirects,
+            /// The `user-agent` header. `null` sends the std default,
+            /// which is `zig/<version>` — every server the app talks
+            /// to sees it. An app fetching on a reader's behalf
+            /// usually wants to name itself instead. An empty or
+            /// over-long value rejects the fetch.
+            user_agent: ?[]const u8 = null,
             on_response: ?ResponseMsgFn = null,
         };
 
@@ -4676,6 +4696,9 @@ pub fn Effects(comptime Msg: type) type {
             header_slices: [max_effect_fetch_headers]std.http.Header = undefined,
             header_count: usize = 0,
             timeout_ms: u32 = default_effect_fetch_timeout_ms,
+            max_redirects: u16 = default_effect_fetch_max_redirects,
+            user_agent_storage: [max_effect_fetch_ua_bytes]u8 = undefined,
+            user_agent_len: usize = 0,
             /// Heap buffer per accepted fetch: request payload copy
             /// followed by `max_effect_body_bytes` of response space.
             /// File effects use it too: a write's payload copy, or a
@@ -4710,6 +4733,11 @@ pub fn Effects(comptime Msg: type) type {
 
             fn fetchHeaders(slot: *const Slot) []const std.http.Header {
                 return slot.header_slices[0..slot.header_count];
+            }
+
+            fn fetchUserAgent(slot: *const Slot) ?[]const u8 {
+                if (slot.user_agent_len == 0) return null;
+                return slot.user_agent_storage[0..slot.user_agent_len];
             }
 
             fn fetchPayload(slot: *const Slot) []const u8 {
@@ -7031,6 +7059,9 @@ pub fn Effects(comptime Msg: type) type {
             if (options.max_line_bytes == 0 or options.max_line_bytes > max_effect_line_bytes_ceiling) {
                 return self.rejectFetch(options);
             }
+            if (options.user_agent) |ua| {
+                if (ua.len == 0 or ua.len > max_effect_fetch_ua_bytes) return self.rejectFetch(options);
+            }
             if (self.keyOccupiedUntilDelivery(options.key)) return self.rejectFetch(options);
             const slot_index = self.findIdleSlot() orelse return self.rejectFetch(options);
 
@@ -7052,6 +7083,13 @@ pub fn Effects(comptime Msg: type) type {
             slot.fetch_response_mode = options.response;
             slot.method = options.method;
             slot.timeout_ms = options.timeout_ms;
+            slot.max_redirects = options.max_redirects;
+            if (options.user_agent) |ua| {
+                @memcpy(slot.user_agent_storage[0..ua.len], ua);
+                slot.user_agent_len = ua.len;
+            } else {
+                slot.user_agent_len = 0;
+            }
             slot.line_limit = options.max_line_bytes;
             if (slot.line_buffer) |old| {
                 self.allocator.free(old);
@@ -16583,10 +16621,19 @@ pub fn Effects(comptime Msg: type) type {
             defer client.deinit();
             var request = client.request(slot.method, uri, .{
                 .keep_alive = false,
+                .headers = .{
+                    .user_agent = if (slot.fetchUserAgent()) |ua|
+                        .{ .override = ua }
+                    else
+                        .default,
+                },
                 .extra_headers = slot.fetchHeaders(),
                 // Mirrors `std.http.Client.fetch`: payloads cannot be
                 // replayed across redirects.
-                .redirect_behavior = if (slot.payload_len > 0) .unhandled else @enumFromInt(3),
+                .redirect_behavior = if (slot.payload_len > 0)
+                    .unhandled
+                else
+                    @enumFromInt(slot.max_redirects),
             }) catch |err| {
                 // Establishing the connection is what `request` does, so
                 // an UNTYPED failure here is a connect failure. (The
